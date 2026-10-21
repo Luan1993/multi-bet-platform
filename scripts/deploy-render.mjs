@@ -17,6 +17,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -108,19 +109,24 @@ async function api(method, endpoint, body) {
 
 async function checkRepo() {
   console.log(`Repositório: ${REPO_URL}`);
-  try {
-    const res = await fetch(`${REPO_URL}/info/refs`, {
-      signal: AbortSignal.timeout(20_000),
-      headers: { "User-Agent": "render-deploy-check" },
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    console.log("Repositório acessível.");
-  } catch (err) {
+  const git =
+    process.env.GIT_BIN || path.join(ROOT, ".runtime", "git", "cmd", "git.exe");
+  const result = spawnSync(git, ["ls-remote", REPO_URL, "HEAD"], {
+    encoding: "utf8",
+    timeout: 60_000,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: "0" },
+  });
+  if (result.status !== 0) {
+    const detail =
+      (result.stderr || "").trim() ||
+      result.error?.message ||
+      `código ${result.status}`;
     throw new Error(
-      `O repositório Git temporário não está acessível (${err.message}). ` +
-        "Mantenha o túnel/servidor Git ligado durante o build."
+      `Não foi possível acessar o repositório Git (${detail}). ` +
+        "Verifique se ele é público e se a URL está correta."
     );
   }
+  console.log("Repositório acessível.");
 }
 
 async function waitForPostgres(postgresId) {

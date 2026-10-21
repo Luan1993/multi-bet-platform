@@ -8,6 +8,8 @@ Plataforma de apostas esportivas **multi-tenant** com três ambientes:
 
 > **Aviso:** o sistema opera em **modo demonstração** por padrão. Ele não movimenta depósitos, saques, saldos ou prêmios reais. A operação real exige autorização legal e integrações homologadas.
 
+**Deploy atual:** https://multi-bet.onrender.com — instruções e limitações em [DEPLOY.md](DEPLOY.md).
+
 ## Stack
 
 - **Backend:** Node.js + TypeScript + Express (`server/`)

@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: bet
+      POSTGRES_USER: bet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD no .env.production}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U bet -d bet"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: postgresql://bet:${POSTGRES_PASSWORD}@db:5432/bet
+      SESSION_SECRET: ${SESSION_SECRET:?defina SESSION_SECRET no .env.production}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-http://localhost:4000}
+      DEMO_MODE: "true"
+      ODDS_PROVIDER: demo
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:?defina ADMIN_PASSWORD no .env.production}
+      SELLER01_PASSWORD: ${SELLER01_PASSWORD:?defina SELLER01_PASSWORD no .env.production}
+      SELLER02_PASSWORD: ${SELLER02_PASSWORD:?defina SELLER02_PASSWORD no .env.production}
+    ports:
+      - "4000:4000"
+
+volumes:
+  pgdata:

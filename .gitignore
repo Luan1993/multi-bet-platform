@@ -1,0 +1,27 @@
+# Runtime portátil (baixado localmente)
+.runtime/
+
+# Dependências
+node_modules/
+dist/
+build/
+
+# Variáveis de ambiente / segredos
+.env
+.env.local
+*.local
+
+# Dados locais do PostgreSQL portátil
+.pgdata/
+pg.log
+
+# Uploads locais (logotipos agora também ficam no banco)
+server/uploads/
+
+# Dados do sistema
+data/*.db
+*.log
+
+# Sistema
+.DS_Store
+Thumbs.db

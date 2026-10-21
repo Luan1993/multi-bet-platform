@@ -1,0 +1,27 @@
+{
+  "name": "bet-platform",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Plataforma multi-bet multi-tenant com painel administrativo, painéis individuais e página pública de apostas",
+  "workspaces": [
+    "server",
+    "web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w server",
+    "dev:web": "npm run dev -w web",
+    "build": "npm run build -w server && npm run build -w web",
+    "start:prod": "node scripts/deploy-start.cjs",
+    "test": "npm run test -w server",
+    "db:migrate": "npm run db:migrate -w server",
+    "db:seed": "npm run db:seed -w server"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "esbuild@0.28.2": true,
+    "esbuild@0.21.5": true,
+    "@embedded-postgres/windows-x64@17.4.0-beta.15": true
+  }
+}

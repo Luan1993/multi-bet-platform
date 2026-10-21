@@ -1,0 +1,34 @@
+services:
+  - type: web
+    name: multi-bet
+    runtime: node
+    plan: free
+    region: oregon
+    branch: main
+    buildCommand: npm ci --include=dev && npm run build
+    startCommand: node scripts/deploy-start.cjs
+    healthCheckPath: /api/health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: NODE_VERSION
+        value: 22.14.0
+      - key: DEMO_MODE
+        value: "true"
+      - key: ODDS_PROVIDER
+        value: demo
+      # Segredos gerados pelo Render. Veja os valores no painel do serviço.
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: ADMIN_PASSWORD
+        generateValue: true
+      - key: SELLER01_PASSWORD
+        generateValue: true
+      - key: SELLER02_PASSWORD
+        generateValue: true
+      # PostgreSQL externo gratuito (Neon/Supabase/Aiven).
+      # No Blueprint, o Render pede este valor na criação do serviço.
+      # Formato: postgresql://user:senha@host:5432/banco?sslmode=require
+      - key: DATABASE_URL
+        sync: false

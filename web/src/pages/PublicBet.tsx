@@ -40,6 +40,25 @@ function brl(cents: number): string {
   return (cents / 100).toLocaleString("pt-BR", { style: "currency", currency: "BRL" });
 }
 
+function onlyDigits(v: string): string {
+  return (v || "").replace(/\D/g, "");
+}
+
+function statusColor(status: string): string {
+  switch (status) {
+    case "accepted":
+      return "#22c55e";
+    case "won":
+      return "#4ade80";
+    case "lost":
+      return "#f87171";
+    case "pending":
+      return "#fbbf24";
+    default:
+      return "var(--text-dim)";
+  }
+}
+
 export default function PublicBet() {
   const { slug } = useParams();
   const [loading, setLoading] = useState(true);
@@ -50,7 +69,11 @@ export default function PublicBet() {
   const [stake, setStake] = useState<number>(0);
   const [error, setError] = useState<string | null>(null);
   const [coupon, setCoupon] = useState<any>(null);
-  const [clientCode, setClientCode] = useState("");
+  const [clientPhone, setClientPhone] = useState("");
+  const [myPhone, setMyPhone] = useState("");
+  const [myCoupons, setMyCoupons] = useState<Array<any> | null>(null);
+  const [myLoading, setMyLoading] = useState(false);
+  const [myError, setMyError] = useState<string | null>(null);
   const [leagueFilter, setLeagueFilter] = useState<string>("all");
   const [creating, setCreating] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
@@ -154,9 +177,17 @@ export default function PublicBet() {
       const res = await api.post(`/api/bet/${slug}/coupons`, {
         selections: selList,
         stakeCents,
-        clientCode: clientCode.trim() || undefined,
+        clientPhone: clientPhone.trim() || undefined,
       });
       setCoupon(res);
+      // Se o número informado é o mesmo usado em "Meus jogos", atualiza a lista.
+      if (
+        clientPhone.trim() &&
+        myPhone.trim() &&
+        onlyDigits(clientPhone) === onlyDigits(myPhone)
+      ) {
+        fetchMyGames();
+      }
     } catch (err: any) {
       setError(err.message);
       // Odds mudaram ou mercado suspenso: recarrega os eventos e limpa a seleção antiga.
@@ -171,6 +202,22 @@ export default function PublicBet() {
       }
     } finally {
       setCreating(false);
+    }
+  }
+
+  async function fetchMyGames() {
+    const phone = myPhone.trim();
+    if (!phone) return;
+    setMyError(null);
+    setMyLoading(true);
+    try {
+      const res = await api.get(`/api/bet/${slug}/coupons?phone=${encodeURIComponent(phone)}`);
+      setMyCoupons(res.coupons ?? []);
+    } catch (err: any) {
+      setMyError(err.message || "Não foi possível consultar.");
+      setMyCoupons(null);
+    } finally {
+      setMyLoading(false);
     }
   }
 
@@ -446,13 +493,13 @@ export default function PublicBet() {
                   )}
 
                   <label style={{ display: "block", marginTop: "0.75rem", marginBottom: "0.35rem", color: "var(--text-dim)", fontSize: "0.875rem" }}>
-                    Código do cliente (opcional)
+                    WhatsApp (opcional)
                   </label>
                   <input
-                    type="text"
-                    value={clientCode}
-                    onChange={(e) => setClientCode(e.target.value)}
-                    placeholder="Ex.: CL-XXXXXXX"
+                    type="tel"
+                    value={clientPhone}
+                    onChange={(e) => setClientPhone(e.target.value)}
+                    placeholder="Ex.: (11) 91234-5678"
                     style={{
                       width: "100%",
                       padding: "0.5rem",
@@ -561,6 +608,101 @@ export default function PublicBet() {
                   O pré-cupom é confirmado pelo proprietário da bet após revalidação das odds no servidor.
                 </p>
               </>
+            )}
+          </div>
+
+          <div style={{ background: "var(--panel)", border: "1px solid var(--border)", borderRadius: "8px", padding: "1.5rem", marginTop: "1rem" }}>
+            <h3 style={{ margin: "0 0 0.5rem 0" }}>Meus jogos</h3>
+            <p style={{ color: "var(--text-dim)", fontSize: "0.8125rem", marginTop: 0, marginBottom: "0.75rem", lineHeight: 1.4 }}>
+              Informe o WhatsApp usado no cupom para acompanhar a situação das suas apostas.
+            </p>
+            <div style={{ display: "flex", gap: "0.5rem" }}>
+              <input
+                type="tel"
+                value={myPhone}
+                onChange={(e) => {
+                  setMyPhone(e.target.value);
+                  setMyCoupons(null);
+                  setMyError(null);
+                }}
+                placeholder="(11) 91234-5678"
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    fetchMyGames();
+                  }
+                }}
+                style={{
+                  flex: 1,
+                  minWidth: 0,
+                  padding: "0.5rem",
+                  background: surface,
+                  border: "1px solid var(--border)",
+                  borderRadius: "6px",
+                  color: "var(--text)",
+                }}
+              />
+              <button
+                type="button"
+                onClick={fetchMyGames}
+                disabled={myLoading || !myPhone.trim()}
+                style={{
+                  padding: "0.5rem 0.9rem",
+                  background: "var(--primary)",
+                  color: "#fff",
+                  border: "none",
+                  borderRadius: "6px",
+                  fontWeight: 600,
+                  cursor: myPhone.trim() ? "pointer" : "not-allowed",
+                  opacity: myPhone.trim() ? 1 : 0.5,
+                }}
+              >
+                {myLoading ? "..." : "Consultar"}
+              </button>
+            </div>
+
+            {myError && (
+              <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.4)", color: "#fca5a5", padding: "0.6rem", borderRadius: "6px", marginTop: "0.75rem", fontSize: "0.8125rem" }}>
+                {myError}
+              </div>
+            )}
+
+            {myCoupons !== null && !myError && myCoupons.length === 0 && (
+              <div style={{ color: "var(--text-dim)", fontSize: "0.8125rem", marginTop: "0.75rem" }}>
+                Nenhum jogo encontrado para este número.
+              </div>
+            )}
+
+            {myCoupons !== null && myCoupons.length > 0 && (
+              <div style={{ display: "grid", gap: "0.5rem", marginTop: "0.75rem", maxHeight: "320px", overflowY: "auto" }}>
+                {myCoupons.map((c) => (
+                  <a
+                    key={c.code}
+                    href={`/recibo/${c.code}`}
+                    style={{
+                      display: "block",
+                      background: surface,
+                      border: "1px solid var(--border)",
+                      borderRadius: "6px",
+                      padding: "0.65rem 0.75rem",
+                      textDecoration: "none",
+                    }}
+                  >
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", alignItems: "center" }}>
+                      <span style={{ fontWeight: 700, letterSpacing: "0.5px", color: "var(--text)", fontSize: "0.8125rem" }}>{c.code}</span>
+                      <span style={{ fontSize: "0.75rem", color: statusColor(c.status), fontWeight: 600 }}>{c.statusLabel}</span>
+                    </div>
+                    <div style={{ display: "flex", justifyContent: "space-between", gap: "0.5rem", marginTop: "0.25rem", fontSize: "0.75rem", color: "var(--text-dim)" }}>
+                      <span>
+                        {brl(c.stakeCents)} · odd {Number(c.combinedOdd).toFixed(2)}
+                      </span>
+                      <span>
+                        {new Date(c.createdAt).toLocaleString("pt-BR", { dateStyle: "short", timeStyle: "short" })}
+                      </span>
+                    </div>
+                  </a>
+                ))}
+              </div>
             )}
           </div>
         </div>

@@ -6,7 +6,7 @@ import { query, queryOne, withTransaction } from "../../db/pool";
 import { badRequest, conflict, notFound, providerUnavailable, AppError } from "../../lib/errors";
 import { formatCode, generateCouponCode, normalizeCouponCode } from "../../lib/codes";
 import { combineOdds, potentialPayoutCents } from "../../lib/money";
-import { parseBody, clientIp, userAgent } from "../../lib/validate";
+import { parseBody, clientIp, userAgent, normalizePhone } from "../../lib/validate";
 import { audit, riskEvent } from "../../lib/audit";
 import { couponCreateLimiter, lookupLimiter } from "../../middleware/rateLimit";
 import { getPublicEvents, getProviderMeta, revalidateSelections, findSelectionConflicts } from "../odds/service";
@@ -84,6 +84,15 @@ const DISCLAIMER_PENDING =
   "PRÉ-CUPOM — NÃO É UMA APOSTA ACEITA. Este código atesta apenas a simulação das seleções e do valor. " +
   "Não confere direito a prêmio. A aposta só passa a valer após confirmação/aceitação registrada pela operação.";
 
+const STATUS_LABELS: Record<string, string> = {
+  pending: "Aguardando confirmação",
+  accepted: "Confirmado",
+  cancelled: "Cancelado",
+  expired: "Expirado",
+  won: "Ganhador",
+  lost: "Perdedor",
+};
+
 // ---------------------------------------------------------------------------
 // GET /api/bet/:slug — página pública personalizada da bet
 // ---------------------------------------------------------------------------
@@ -126,6 +135,75 @@ publicRoutes.get("/bet/:slug", async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// GET /api/bet/:slug/coupons?phone= — consulta pública dos jogos do cliente
+// (o apostador consulta os próprios cupons pelo WhatsApp informado na criação)
+// ---------------------------------------------------------------------------
+publicRoutes.get("/bet/:slug/coupons", lookupLimiter, async (req, res, next) => {
+  try {
+    const owner = await getActiveOwnerBySlug(req.params.slug);
+    if (!owner) throw notFound("Bet não encontrada ou indisponível.", "bet_not_found");
+    const ownerId = Number(owner.id);
+
+    const digits = normalizePhone(req.query.phone);
+    if (!digits) {
+      throw badRequest("invalid_phone", "Informe um telefone válido com DDD (ex.: 11912345678).");
+    }
+
+    const rows = await query<{
+      code: string;
+      status: string;
+      stake_cents: string;
+      combined_odd: string;
+      potential_payout_cents: string;
+      is_demo: boolean;
+      created_at: Date;
+      expires_at: Date;
+    }>(
+      `SELECT c.code, c.status, c.stake_cents, c.combined_odd, c.potential_payout_cents,
+              c.is_demo, c.created_at, c.expires_at
+         FROM coupons c
+        WHERE c.owner_id = $1
+          AND (c.client_phone = $2
+               OR c.client_id IN (
+                    SELECT cl.id FROM clients cl
+                     WHERE cl.owner_id = $1
+                       AND regexp_replace(cl.phone, '[^0-9]', '', 'g') = $2
+               ))
+        ORDER BY c.created_at DESC
+        LIMIT 50`,
+      [ownerId, digits]
+    );
+
+    const now = Date.now();
+    const coupons = rows.map((r) => {
+      // Expiração visual: pendentes vencidos aparecem como expirados
+      const status = r.status === "pending" && new Date(r.expires_at).getTime() < now ? "expired" : r.status;
+      return {
+        code: r.code,
+        status,
+        statusLabel: STATUS_LABELS[status] ?? status,
+        stakeCents: Number(r.stake_cents),
+        combinedOdd: Number(r.combined_odd),
+        potentialPayoutCents: Number(r.potential_payout_cents),
+        isDemo: r.is_demo,
+        createdAt: new Date(r.created_at).toISOString(),
+        expiresAt: new Date(r.expires_at).toISOString(),
+        receiptUrl: `${config.publicBaseUrl}/recibo/${r.code}`,
+      };
+    });
+
+    res.json({
+      phone: digits,
+      ownerSlug: owner.slug,
+      total: coupons.length,
+      coupons,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // POST /api/bet/:slug/coupons — criação de pré-cupom (item 6/7)
 // ---------------------------------------------------------------------------
 const createCouponSchema = z.object({
@@ -139,6 +217,7 @@ const createCouponSchema = z.object({
     .min(1, "Selecione ao menos uma opção.")
     .max(10, "Máximo de 10 seleções por cupom."),
   stakeCents: z.number().int().positive("Informe o valor da aposta."),
+  clientPhone: z.string().trim().max(30).optional(),
   clientCode: z.string().trim().max(40).optional(),
 });
 
@@ -253,9 +332,32 @@ publicRoutes.post("/bet/:slug/coupons", couponCreateLimiter, async (req, res, ne
       );
     }
 
-    // Cliente (opcional): elegibilidade e limites de jogo responsável
+    // Cliente (opcional): identificado pelo WhatsApp/telefone; elegibilidade e
+    // limites de jogo responsável aplicados quando já existe cadastro com o número.
     let clientId: number | null = null;
-    if (body.clientCode) {
+    const phoneDigits = body.clientPhone ? normalizePhone(body.clientPhone) : null;
+    if (body.clientPhone && !phoneDigits) {
+      throw badRequest(
+        "invalid_phone",
+        "Telefone inválido. Informe o número com DDD (ex.: (11) 91234-5678)."
+      );
+    }
+    if (phoneDigits) {
+      const client = await queryOne<{ id: string; status: string; phone: string | null }>(
+        `SELECT id, status, phone FROM clients
+          WHERE owner_id = $1 AND regexp_replace(phone, '[^0-9]', '', 'g') = $2`,
+        [ownerId, phoneDigits]
+      );
+      if (client) {
+        const eligibility = await checkClientEligibility(ownerId, Number(client.id), body.stakeCents);
+        if (!eligibility.ok) {
+          await riskEvent(ownerId, "client_ineligible", { clientId: client.id, reason: eligibility.reason }, { ip });
+          throw new AppError(422, "client_ineligible", eligibility.message ?? "Cliente não elegível para esta aposta.");
+        }
+        clientId = Number(client.id);
+      }
+      // Telefone sem cliente cadastrado: apenas registrado no cupom para consulta futura.
+    } else if (body.clientCode) {
       const client = await queryOne<{ id: string; status: string }>(
         `SELECT id, status FROM clients WHERE owner_id = $1 AND code = $2`,
         [ownerId, body.clientCode.toUpperCase()]
@@ -326,15 +428,16 @@ publicRoutes.post("/bet/:slug/coupons", couponCreateLimiter, async (req, res, ne
       try {
         created = await withTransaction(async (client) => {
           const row = await client.query<{ code: string }>(
-            `INSERT INTO coupons (code, owner_id, client_id, status, stake_cents, combined_odd,
+            `INSERT INTO coupons (code, owner_id, client_id, client_phone, status, stake_cents, combined_odd,
                                   potential_payout_cents, is_demo, limit_applied_cents, odds_snapshot,
                                   expires_at, client_ip, user_agent)
-             VALUES ($1,$2,$3,'pending',$4,$5,$6,$7,$8,$9, now() + make_interval(hours => $10), $11, $12)
+             VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,$9,$10, now() + make_interval(hours => $11), $12, $13)
              RETURNING code`,
             [
               code,
               ownerId,
               clientId,
+              phoneDigits,
               body.stakeCents,
               combinedOdd,
               payout,
@@ -385,6 +488,8 @@ publicRoutes.post("/bet/:slug/coupons", couponCreateLimiter, async (req, res, ne
       potentialPayoutCents: payout,
       limitAppliedCents: settings.maxPayoutCents,
       isDemo: settings.demoMode,
+      clientPhone: phoneDigits ?? null,
+      clientCode: body.clientCode ?? null,
       createdAt: new Date().toISOString(),
       expiresAt: new Date(Date.now() + settings.pendingExpiryHours * 3600 * 1000).toISOString(),
       selections: snapshot.selections,

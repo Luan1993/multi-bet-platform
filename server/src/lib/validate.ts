@@ -42,3 +42,15 @@ export function dateParam(v: unknown): Date | null {
   const d = new Date(v.length === 10 ? `${v}T00:00:00Z` : v);
   return Number.isNaN(d.getTime()) ? null : d;
 }
+
+/**
+ * Normaliza telefone (WhatsApp) para somente dígitos.
+ * Aceita máscara, DDD e DDI 55 (ex.: "(11) 91234-5678", "5511912345678").
+ * Retorna null quando o número não tem 10–11 dígitos úteis.
+ */
+export function normalizePhone(value: unknown): string | null {
+  let digits = String(value ?? "").replace(/\D/g, "");
+  if (digits.length > 11 && digits.startsWith("55")) digits = digits.slice(2);
+  if (digits.length < 10 || digits.length > 11) return null;
+  return digits;
+}

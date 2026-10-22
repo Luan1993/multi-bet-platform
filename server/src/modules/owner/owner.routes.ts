@@ -187,12 +187,15 @@ ownerRoutes.get("/coupons", async (req, res, next) => {
       accepted_at: Date | null;
       client_code: string | null;
       client_name: string | null;
+      client_phone: string | null;
+      coupon_client_phone: string | null;
       sel_count: number;
       first_event: string | null;
     }>(
       `SELECT c.id, c.code, c.status, c.stake_cents, c.combined_odd, c.potential_payout_cents,
               c.due_payout_cents, c.paid_payout_cents, c.is_demo, c.created_at, c.expires_at, c.accepted_at,
-              cl.code AS client_code, cl.name AS client_name,
+              cl.code AS client_code, cl.name AS client_name, cl.phone AS client_phone,
+              c.client_phone AS coupon_client_phone,
               jsonb_array_length(c.odds_snapshot->'selections')::int AS sel_count,
               (c.odds_snapshot#>>'{selections,0,eventHome}') || ' x ' || (c.odds_snapshot#>>'{selections,0,eventAway}') AS first_event
          FROM coupons c
@@ -234,6 +237,8 @@ function mapCouponRow(r: {
   accepted_at: Date | null;
   client_code?: string | null;
   client_name?: string | null;
+  client_phone?: string | null;
+  coupon_client_phone?: string | null;
   sel_count?: number;
   first_event?: string | null;
 }) {
@@ -250,7 +255,8 @@ function mapCouponRow(r: {
     createdAt: new Date(r.created_at).toISOString(),
     expiresAt: new Date(r.expires_at).toISOString(),
     acceptedAt: r.accepted_at ? new Date(r.accepted_at).toISOString() : null,
-    client: r.client_code ? { code: r.client_code, name: r.client_name } : null,
+    clientPhone: r.client_phone ?? r.coupon_client_phone ?? null,
+    client: r.client_code ? { code: r.client_code, name: r.client_name, phone: r.client_phone ?? null } : null,
     selectionsCount: r.sel_count ?? 0,
     firstEvent: r.first_event ?? null,
   };
@@ -298,12 +304,14 @@ async function loadCoupon(ownerId: number, codeParam: string) {
     client_id: string | null;
     client_code: string | null;
     client_name: string | null;
+    coupon_client_phone: string | null;
+    client_phone: string | null;
   }>(
     `SELECT c.id, c.code, c.status, c.stake_cents, c.combined_odd, c.potential_payout_cents,
             c.due_payout_cents, c.paid_payout_cents, c.is_demo, c.limit_applied_cents, c.created_at,
             c.expires_at, c.accepted_at, c.cancelled_at, c.cancel_reason, c.settled_at, c.settlement_note,
-            c.odds_snapshot, c.client_id,
-            cl.code AS client_code, cl.name AS client_name
+            c.odds_snapshot, c.client_id, c.client_phone AS coupon_client_phone,
+            cl.code AS client_code, cl.name AS client_name, cl.phone AS client_phone
        FROM coupons c
        LEFT JOIN clients cl ON cl.id = c.client_id
       WHERE c.code = $1 AND c.owner_id = $2`,
@@ -359,7 +367,8 @@ ownerRoutes.get("/coupons/:code", async (req, res, next) => {
         settlementNote: row.settlement_note,
         selections: row.odds_snapshot?.selections ?? [],
         provider: row.odds_snapshot?.provider ?? null,
-        client: row.client_id ? { id: Number(row.client_id), code: row.client_code, name: row.client_name } : null,
+        client: row.client_id ? { id: Number(row.client_id), code: row.client_code, name: row.client_name, phone: row.client_phone ?? null } : null,
+        clientPhone: row.coupon_client_phone ?? row.client_phone ?? null,
       },
       history: history.map((h) => ({
         from: h.from_status,

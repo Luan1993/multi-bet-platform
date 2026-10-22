@@ -56,6 +56,13 @@ O servidor só aceita cupons com seleções **compatíveis**:
 - No Total de Gols, escolhas impossíveis juntas são bloqueadas no servidor (ex.: “Mais de 1.5” com “Menos de 1.5”); combinações compatíveis de linhas distintas continuam permitidas (ex.: “Mais de 1.5” com “Menos de 3.5”).
 - Na página pública, escolher uma opção que conflita substitui automaticamente a anterior e exibe um aviso; tentativas diretas à API recebem HTTP 400 `conflicting_selections`.
 
+## WhatsApp do cliente (consulta dos jogos)
+
+- Na criação do cupom, o campo “Código do cliente” virou **WhatsApp (opcional)**: o número é normalizado no servidor e salvo no cupom (`coupons.client_phone`), mesmo sem cliente cadastrado.
+- Se existir cliente cadastrado com o mesmo número, o cupom é vinculado a ele (elegibilidade/limites aplicam).
+- Na página pública, o bloco **“Meus jogos”** permite ao cliente consultar os próprios cupons pelo número: `GET /api/bet/:slug/coupons?phone=` (limitado a 50, mais recentes primeiro).
+- O painel do dono exibe o WhatsApp do apostador na lista/detalhe do cupom.
+
 ## Limitações do plano free do Render
 
 - O serviço hiberna após **15 minutos sem acesso**. A primeira requisição depois disso pode levar ~1 minuto.

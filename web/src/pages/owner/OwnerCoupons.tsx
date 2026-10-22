@@ -13,7 +13,8 @@ interface CouponRow {
   paidPayoutCents: number | null;
   createdAt: string;
   expiresAt: string;
-  client: { code: string; name: string } | null;
+  client: { code: string; name: string; phone: string | null } | null;
+  clientPhone: string | null;
   selectionsCount: number;
   firstEvent: string | null;
 }
@@ -147,7 +148,7 @@ export default function OwnerCoupons() {
               <tr key={c.id} style={{ borderBottom: "1px solid var(--border)" }}>
                 <td style={{ ...tdStyle, fontFamily: "monospace", whiteSpace: "nowrap" }}>{c.code}</td>
                 <td style={tdStyle}><Badge status={c.status} /></td>
-                <td style={tdStyle}>{c.client ? `${c.client.name} (${c.client.code})` : "—"}</td>
+                <td style={tdStyle}>{c.client ? `${c.client.name} (${c.client.code})` : c.clientPhone || "—"}</td>
                 <td style={{ ...tdStyle, maxWidth: "220px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{c.firstEvent ?? "—"}</td>
                 <td style={tdStyle}>{brl(c.stakeCents)}</td>
                 <td style={tdStyle}>{c.combinedOdd?.toFixed(2)}</td>
@@ -233,6 +234,9 @@ function CouponModal({
         <Info label="Limite aplicado" value={brl(c.limitAppliedCents)} />
         <Info label="Expira em" value={new Date(c.expiresAt).toLocaleString("pt-BR")} />
         <Info label="Cliente" value={c.client ? `${c.client.name} (${c.client.code})` : "—"} />
+        {(c.client?.phone || c.clientPhone) && (
+          <Info label="WhatsApp" value={c.client?.phone || c.clientPhone || ""} />
+        )}
       </div>
 
       <div style={{ marginBottom: "1rem" }}>

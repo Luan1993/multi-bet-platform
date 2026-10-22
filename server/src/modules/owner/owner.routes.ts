@@ -88,6 +88,16 @@ ownerRoutes.get("/dashboard", async (req, res, next) => {
       [ownerId]
     );
 
+    // Caixa (acumulado) e últimos pagamentos realizados
+    const cash = await computeOwnerCash(ownerId);
+    const recentPayments = await query<{ code: string; paid_payout_cents: string; settled_at: Date | null }>(
+      `SELECT code, paid_payout_cents, settled_at FROM coupons
+        WHERE owner_id = $1 AND paid_payout_cents > 0
+        ORDER BY settled_at DESC NULLS LAST
+        LIMIT 8`,
+      [ownerId]
+    );
+
     const settings = await getEffectiveSettings(ownerId);
     const owner = await queryOne<{ slug: string; name: string }>(
       `SELECT slug, name FROM owners WHERE id = $1`,
@@ -96,6 +106,12 @@ ownerRoutes.get("/dashboard", async (req, res, next) => {
 
     res.json({
       period: { from: from.toISOString(), to: to.toISOString() },
+      cash,
+      recentPayments: recentPayments.map((p) => ({
+        code: p.code,
+        paidCents: Number(p.paid_payout_cents),
+        settledAt: p.settled_at ? new Date(p.settled_at).toISOString() : null,
+      })),
       counters: {
         total: Number(stats?.total ?? 0),
         pending: Number(stats?.pending ?? 0),
@@ -641,6 +657,144 @@ ownerRoutes.get("/coupons/:code/qr", async (req, res, next) => {
 });
 
 // ---------------------------------------------------------------------------
+// Caixa da operação (saldo, entradas, saídas, lucro/prejuízo)
+// ---------------------------------------------------------------------------
+async function computeOwnerCash(ownerId: number) {
+  const ledger = await queryOne<{ stake_in: string; prize_paid: string; adjustments: string; accepted_coupons: number }>(
+    `SELECT COALESCE(SUM(amount_cents) FILTER (WHERE type = 'stake_accepted'), 0)::bigint AS stake_in,
+            COALESCE(SUM(amount_cents) FILTER (WHERE type = 'prize_paid'), 0)::bigint AS prize_paid,
+            COALESCE(SUM(amount_cents) FILTER (WHERE type = 'adjustment'), 0)::bigint AS adjustments,
+            COUNT(*) FILTER (WHERE type = 'stake_accepted')::int AS accepted_coupons
+       FROM financial_movements
+      WHERE owner_id = $1`,
+    [ownerId]
+  );
+  const opening = await queryOne<{ opening_cash_cents: string }>(
+    `SELECT opening_cash_cents FROM owner_settings WHERE owner_id = $1`,
+    [ownerId]
+  );
+  const pending = await queryOne<{ due: string }>(
+    `SELECT COALESCE(SUM(due_payout_cents), 0)::bigint AS due FROM coupons WHERE owner_id = $1 AND status = 'accepted'`,
+    [ownerId]
+  );
+
+  const openingCash = Number(opening?.opening_cash_cents ?? 0);
+  const entradas = Number(ledger?.stake_in ?? 0);
+  const saidas = Number(ledger?.prize_paid ?? 0);
+  const ajustes = Number(ledger?.adjustments ?? 0);
+
+  return {
+    openingCashCents: openingCash,
+    entradasCents: entradas,
+    saidasCents: saidas,
+    ajustesCents: ajustes,
+    pendentesCents: Number(pending?.due ?? 0),
+    saldoCents: openingCash + entradas + ajustes - saidas,
+    resultadoCents: entradas - saidas,
+    acceptedCoupons: Number(ledger?.accepted_coupons ?? 0),
+  };
+}
+
+const cashAdjustmentSchema = z.object({
+  direction: z.enum(["in", "out"]),
+  amountCents: z
+    .number()
+    .int()
+    .positive("Informe um valor maior que zero.")
+    .max(2_000_000_000, "Valor muito alto."),
+  note: z.string().trim().min(3, "Descreva o motivo do ajuste (mín. 3 caracteres).").max(200),
+});
+
+ownerRoutes.post("/cash/adjustment", async (req, res, next) => {
+  try {
+    const ownerId = ownerIdOf(req);
+    const body = parseBody(cashAdjustmentSchema, req.body);
+    const signed = body.direction === "out" ? -body.amountCents : body.amountCents;
+    const settings = await getEffectiveSettings(ownerId);
+    const label = body.direction === "in" ? "entrada" : "retirada";
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `INSERT INTO financial_movements (owner_id, coupon_id, type, amount_cents, is_demo, note, created_by)
+         VALUES ($1, NULL, 'adjustment', $2, $3, $4, $5)`,
+        [ownerId, signed, settings.demoMode, `Ajuste de caixa (${label}): ${body.note}`, req.user!.id]
+      );
+      await audit({
+        ...auditCtx(req),
+        action: "cash.adjustment",
+        entity: "financial_movements",
+        entityId: String(ownerId),
+        after: { direction: body.direction, amountCents: signed, note: body.note },
+      }, client);
+    });
+
+    res.status(201).json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+ownerRoutes.get("/cash", async (req, res, next) => {
+  try {
+    const ownerId = ownerIdOf(req);
+    const from = dateParam(req.query.from) ?? new Date(Date.now() - 30 * 24 * 3600 * 1000);
+    const to = dateParam(req.query.to) ?? new Date();
+
+    const summary = await computeOwnerCash(ownerId);
+
+    const period = await queryOne<{ entradas: string; saidas: string; ajustes: string }>(
+      `SELECT COALESCE(SUM(amount_cents) FILTER (WHERE type = 'stake_accepted'), 0)::bigint AS entradas,
+              COALESCE(SUM(amount_cents) FILTER (WHERE type = 'prize_paid'), 0)::bigint AS saidas,
+              COALESCE(SUM(amount_cents) FILTER (WHERE type = 'adjustment'), 0)::bigint AS ajustes
+         FROM financial_movements
+        WHERE owner_id = $1 AND created_at BETWEEN $2 AND $3`,
+      [ownerId, from, to]
+    );
+
+    const movementRows = await query<{
+      id: string;
+      type: string;
+      amount_cents: string;
+      note: string | null;
+      created_at: Date;
+      is_demo: boolean;
+      coupon_code: string | null;
+    }>(
+      `SELECT f.id, f.type, f.amount_cents, f.note, f.created_at, f.is_demo, c.code AS coupon_code
+         FROM financial_movements f
+         LEFT JOIN coupons c ON c.id = f.coupon_id
+        WHERE f.owner_id = $1 AND f.created_at BETWEEN $2 AND $3
+        ORDER BY f.created_at DESC
+        LIMIT 300`,
+      [ownerId, from, to]
+    );
+
+    res.json({
+      ...summary,
+      period: {
+        from: from.toISOString(),
+        to: to.toISOString(),
+        entradasCents: Number(period?.entradas ?? 0),
+        saidasCents: Number(period?.saidas ?? 0),
+        ajustesCents: Number(period?.ajustes ?? 0),
+        resultadoCents: Number(period?.entradas ?? 0) - Number(period?.saidas ?? 0),
+      },
+      movements: movementRows.map((m) => ({
+        id: Number(m.id),
+        type: m.type,
+        amountCents: Number(m.amount_cents),
+        note: m.note ?? null,
+        createdAt: new Date(m.created_at).toISOString(),
+        isDemo: m.is_demo,
+        couponCode: m.coupon_code,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Relatórios
 // ---------------------------------------------------------------------------
 ownerRoutes.get("/reports/daily", async (req, res, next) => {
@@ -870,8 +1024,8 @@ ownerRoutes.get("/settings", async (req, res, next) => {
   try {
     const ownerId = ownerIdOf(req);
     const effective = await getEffectiveSettings(ownerId);
-    const own = await queryOne<{ max_payout_cents: string | null; min_stake_cents: string | null; max_stake_cents: string | null }>(
-      `SELECT max_payout_cents, min_stake_cents, max_stake_cents FROM owner_settings WHERE owner_id = $1`,
+    const own = await queryOne<{ max_payout_cents: string | null; min_stake_cents: string | null; max_stake_cents: string | null; opening_cash_cents: string | null }>(
+      `SELECT max_payout_cents, min_stake_cents, max_stake_cents, opening_cash_cents FROM owner_settings WHERE owner_id = $1`,
       [ownerId]
     );
     const platform = await queryOne<{ max_payout_cents: string; min_stake_cents: string; max_stake_cents: string; demo_mode: boolean }>(
@@ -882,6 +1036,7 @@ ownerRoutes.get("/settings", async (req, res, next) => {
         maxPayoutCents: own?.max_payout_cents ? Number(own.max_payout_cents) : null,
         minStakeCents: own?.min_stake_cents ? Number(own.min_stake_cents) : null,
         maxStakeCents: own?.max_stake_cents ? Number(own.max_stake_cents) : null,
+        openingCashCents: own?.opening_cash_cents != null ? Number(own.opening_cash_cents) : 0,
       },
       effective: {
         maxPayoutCents: effective.maxPayoutCents,
@@ -904,6 +1059,7 @@ const ownerSettingsSchema = z.object({
   maxPayoutCents: z.number().int().positive().nullable().optional(),
   minStakeCents: z.number().int().positive().nullable().optional(),
   maxStakeCents: z.number().int().positive().nullable().optional(),
+  openingCashCents: z.number().int().min(0, "O caixa inicial não pode ser negativo.").optional(),
 });
 
 ownerRoutes.put("/settings", async (req, res, next) => {
@@ -930,14 +1086,15 @@ ownerRoutes.put("/settings", async (req, res, next) => {
 
     const before = await queryOne(`SELECT * FROM owner_settings WHERE owner_id = $1`, [ownerId]);
     await query(
-      `INSERT INTO owner_settings (owner_id, max_payout_cents, min_stake_cents, max_stake_cents)
-       VALUES ($1,$2,$3,$4)
+      `INSERT INTO owner_settings (owner_id, max_payout_cents, min_stake_cents, max_stake_cents, opening_cash_cents)
+       VALUES ($1,$2,$3,$4,$5)
        ON CONFLICT (owner_id) DO UPDATE SET
          max_payout_cents = EXCLUDED.max_payout_cents,
          min_stake_cents = EXCLUDED.min_stake_cents,
          max_stake_cents = EXCLUDED.max_stake_cents,
-         updated_at = now(), updated_by = $5`,
-      [ownerId, body.maxPayoutCents ?? null, body.minStakeCents ?? null, body.maxStakeCents ?? null, req.user!.id]
+         opening_cash_cents = EXCLUDED.opening_cash_cents,
+         updated_at = now(), updated_by = $6`,
+      [ownerId, body.maxPayoutCents ?? null, body.minStakeCents ?? null, body.maxStakeCents ?? null, body.openingCashCents ?? 0, req.user!.id]
     );
     await audit({ ...auditCtx(req), action: "owner_settings.update", entity: "owner_settings", entityId: String(ownerId), before, after: body });
     res.json({ ok: true });

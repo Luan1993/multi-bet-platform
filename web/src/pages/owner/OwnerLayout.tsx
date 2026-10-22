@@ -29,6 +29,7 @@ export default function OwnerLayout() {
         )}
         <nav style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
           <Link to="/owner" style={{ padding: "0.5rem", borderRadius: "6px" }}>Dashboard</Link>
+          <Link to="/owner/cash" style={{ padding: "0.5rem", borderRadius: "6px" }}>Caixa</Link>
           <Link to="/owner/coupons" style={{ padding: "0.5rem", borderRadius: "6px" }}>Cupons</Link>
           <Link to="/owner/clients" style={{ padding: "0.5rem", borderRadius: "6px" }}>Clientes</Link>
           <Link to="/owner/reports" style={{ padding: "0.5rem", borderRadius: "6px" }}>Relatórios</Link>

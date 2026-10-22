@@ -9,6 +9,7 @@ import AdminSettings from "./pages/admin/AdminSettings";
 import AdminAudit from "./pages/admin/AdminAudit";
 import OwnerLayout from "./pages/owner/OwnerLayout";
 import OwnerDashboard from "./pages/owner/OwnerDashboard";
+import OwnerCash from "./pages/owner/OwnerCash";
 import OwnerCoupons from "./pages/owner/OwnerCoupons";
 import OwnerClients from "./pages/owner/OwnerClients";
 import OwnerReports from "./pages/owner/OwnerReports";
@@ -59,6 +60,7 @@ function AppRoutes() {
         }
       >
         <Route index element={<OwnerDashboard />} />
+        <Route path="cash" element={<OwnerCash />} />
         <Route path="coupons" element={<OwnerCoupons />} />
         <Route path="clients" element={<OwnerClients />} />
         <Route path="reports" element={<OwnerReports />} />

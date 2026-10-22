@@ -56,6 +56,14 @@ O servidor só aceita cupons com seleções **compatíveis**:
 - No Total de Gols, escolhas impossíveis juntas são bloqueadas no servidor (ex.: “Mais de 1.5” com “Menos de 1.5”); combinações compatíveis de linhas distintas continuam permitidas (ex.: “Mais de 1.5” com “Menos de 3.5”).
 - Na página pública, escolher uma opção que conflita substitui automaticamente a anterior e exibe um aviso; tentativas diretas à API recebem HTTP 400 `conflicting_selections`.
 
+## Caixa, pagamentos e lucro/prejuízo
+
+- **Configurações → Caixa inicial (R$)**: valor que já existia no caixa antes da plataforma (`owner_settings.opening_cash_cents`). Entra no saldo, mas não no lucro.
+- **Página Caixa** (`/owner/cash`): saldo acumulado, entradas (apostas aceitas), saídas (prêmios pagos), ajustes manuais, a pagar (cupons aceitos), lucro/prejuízo e a lista de movimentações por período.
+- **Ajuste de caixa**: reforço (entrada) ou sangria (retirada) com motivo obrigatório; grava em `financial_movements` (tipo `adjustment`) junto das entradas (`stake_accepted`) e pagamentos (`prize_paid`).
+- **Dashboard**: seção “Caixa e resultado”, “Últimos pagamentos” e cupons agrupados por situação.
+- Fórmulas: `saldo = caixa inicial + entradas + ajustes − saídas` e `lucro/prejuízo = entradas − prêmios pagos`.
+
 ## WhatsApp do cliente (consulta dos jogos)
 
 - Na criação do cupom, o campo “Código do cliente” virou **WhatsApp (opcional)**: o número é normalizado no servidor e salvo no cupom (`coupons.client_phone`), mesmo sem cliente cadastrado.

@@ -10,7 +10,7 @@ import { requireAuth, requireOwner } from "../../middleware/auth";
 import { combineOdds, potentialPayoutCents } from "../../lib/money";
 import { formatCode, normalizeCouponCode } from "../../lib/codes";
 import { centsToNumber, toCsv } from "../../lib/csv";
-import { revalidateSelections } from "../odds/service";
+import { revalidateSelections, findSelectionConflicts } from "../odds/service";
 import { getEffectiveSettings } from "../public/public.routes";
 import { clientsRoutes } from "./clients.routes";
 
@@ -427,6 +427,18 @@ ownerRoutes.post("/coupons/:code/accept", async (req, res, next) => {
     if (suspended.length > 0) {
       await riskEvent(ownerId, "market_suspended", { suspended, code: row.code }, { ip, couponCode: row.code });
       throw conflict("market_suspended", "Um ou mais mercados foram suspensos/eventos iniciaram. Aceitação bloqueada.");
+    }
+
+    // Defesa em profundidade: cupons criados antes da regra de exclusão mútua
+    // (ou manipulados diretamente) são bloqueados na aceitação.
+    const conflicts = await findSelectionConflicts(snapshotSelections.map((s) => s.selectionId));
+    if (conflicts.length > 0) {
+      await riskEvent(ownerId, "conflicting_selections", { code: row.code, conflicts }, { ip, couponCode: row.code });
+      throw conflict(
+        "conflicting_selections",
+        `Este cupom contém seleções incompatíveis no mercado "${conflicts[0].marketName}". Aceitação bloqueada.`,
+        { conflicts }
+      );
     }
 
     const combinedOdd = combineOdds(reval.rows.map((r) => r.currentOdd!));

@@ -2,6 +2,7 @@ import { PoolClient } from "pg";
 import { config } from "../../config";
 import { query, queryOne, withTransaction } from "../../db/pool";
 import { logger } from "../../lib/logger";
+import { conflictsBySelection, findConflictPairs, isSinglePickMarket } from "../../lib/markets";
 import { ApiFootballProvider } from "./apiFootball";
 import { DemoProvider } from "./demo";
 import { OddsProvider, ProviderError } from "./types";
@@ -349,6 +350,8 @@ export interface PublicSelection {
   odd: number;
   updatedAt: string;
   stale: boolean;
+  /** Ids de seleções do mesmo mercado com as quais esta NÃO pode ser combinada. */
+  conflictsWith: number[];
 }
 export interface PublicMarket {
   id: number;
@@ -356,6 +359,8 @@ export interface PublicMarket {
   name: string;
   suspended: boolean;
   stale: boolean;
+  /** Verdadeiro quando o mercado só permite uma seleção por evento. */
+  singlePick: boolean;
   selections: PublicSelection[];
 }
 export interface PublicEvent {
@@ -378,6 +383,7 @@ export async function getPublicEvents(windowHours = 48): Promise<{
 }> {
   await ensureFreshDemoData();
   const meta = await getProviderMeta();
+  const activeProviderId = meta.id; // filtra eventos do provedor ativo (evita misturar demo com dados reais)
 
   const eventRows = await query<{
     id: string;
@@ -407,9 +413,10 @@ export async function getPublicEvents(windowHours = 48): Promise<{
         AND e.kickoff_at <= now() + make_interval(hours => $1)
         AND e.status IN ('scheduled','live')
         AND s.slug = 'futebol'
+        AND ($2::text IS NULL OR e.provider = $2)
       ORDER BY c.name, e.kickoff_at
       LIMIT 200`,
-    [windowHours]
+    [windowHours, activeProviderId]
   );
 
   if (eventRows.length === 0) return { meta, events: [] };
@@ -474,6 +481,7 @@ export async function getPublicEvents(windowHours = 48): Promise<{
         name: row.name,
         suspended: row.suspended,
         stale: marketStale,
+        singlePick: true,
         selections: [],
       };
       ev.markets.push(market);
@@ -486,10 +494,82 @@ export async function getPublicEvents(windowHours = 48): Promise<{
       odd: Number(row.odd),
       updatedAt: row.sel_updated ? new Date(row.sel_updated).toISOString() : "",
       stale: selStale,
+      conflictsWith: [],
     });
   }
 
+  // Exclusão mútua por mercado: informa ao cliente quais seleções
+  // não podem compor o mesmo cupom (ex.: "Mais de 1.5" x "Menos de 1.5").
+  for (const ev of byEvent.values()) {
+    for (const market of ev.markets) {
+      const conflicts = conflictsBySelection(market.id, market.key, market.selections);
+      for (const sel of market.selections) {
+        sel.conflictsWith = conflicts.get(sel.id) ?? [];
+      }
+      market.singlePick = isSinglePickMarket(conflicts);
+    }
+  }
+
   return { meta, events: [...byEvent.values()] };
+}
+
+// ---------------------------------------------------------------------------
+// Conflitos entre seleções (validação no servidor — itens 6/8)
+// ---------------------------------------------------------------------------
+
+export interface SelectionConflictDetail {
+  selectionIds: [number, number];
+  names: [string, string];
+  marketId: number;
+  marketKey: string;
+  marketName: string;
+}
+
+/** Detecta seleções do mesmo mercado que não podem coexistir no cupom. */
+export async function findSelectionConflicts(
+  selectionIds: number[]
+): Promise<SelectionConflictDetail[]> {
+  if (selectionIds.length < 2) return [];
+
+  const rows = await query<{
+    id: string;
+    name: string;
+    provider_selection_key: string;
+    market_id: string;
+    market_key: string;
+    market_name: string;
+  }>(
+    `SELECT sel.id, sel.name, sel.provider_selection_key,
+            m.id AS market_id, m.market_key, m.name AS market_name
+       FROM selections sel
+       JOIN markets m ON m.id = sel.market_id
+      WHERE sel.id = ANY($1::bigint[])`,
+    [selectionIds]
+  );
+
+  const pairs = findConflictPairs(
+    rows
+      .filter((r) => r.market_id !== null)
+      .map((r) => ({
+        id: Number(r.id),
+        marketId: Number(r.market_id),
+        marketKey: r.market_key,
+        selectionKey: r.provider_selection_key,
+      }))
+  );
+
+  const nameById = new Map(rows.map((r) => [Number(r.id), r.name]));
+  const marketMeta = new Map<number, { market_name: string; market_key: string }>(
+    rows.map((r) => [Number(r.market_id), { market_name: r.market_name, market_key: r.market_key }])
+  );
+
+  return pairs.map((p) => ({
+    selectionIds: [p.a.id, p.b.id],
+    names: [nameById.get(p.a.id) ?? String(p.a.id), nameById.get(p.b.id) ?? String(p.b.id)],
+    marketId: p.marketId,
+    marketKey: p.marketKey,
+    marketName: marketMeta.get(p.marketId)?.market_name ?? p.marketKey,
+  }));
 }
 
 // ---------------------------------------------------------------------------

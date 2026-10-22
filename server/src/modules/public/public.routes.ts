@@ -9,7 +9,7 @@ import { combineOdds, potentialPayoutCents } from "../../lib/money";
 import { parseBody, clientIp, userAgent } from "../../lib/validate";
 import { audit, riskEvent } from "../../lib/audit";
 import { couponCreateLimiter, lookupLimiter } from "../../middleware/rateLimit";
-import { getPublicEvents, getProviderMeta, revalidateSelections } from "../odds/service";
+import { getPublicEvents, getProviderMeta, revalidateSelections, findSelectionConflicts } from "../odds/service";
 import { logger } from "../../lib/logger";
 import QRCode from "qrcode";
 
@@ -186,6 +186,18 @@ publicRoutes.post("/bet/:slug/coupons", couponCreateLimiter, async (req, res, ne
     const selectionIds = body.selections.map((s) => s.selectionId);
     if (new Set(selectionIds).size !== selectionIds.length) {
       throw badRequest("duplicate_selections", "Existem seleções duplicadas no cupom.");
+    }
+
+    // Exclusão mútua por mercado: um cupom não pode conter duas escolhas que
+    // não podem ocorrer juntas (ex.: "Mais de 1.5" e "Menos de 1.5").
+    const conflicts = await findSelectionConflicts(selectionIds);
+    if (conflicts.length > 0) {
+      await riskEvent(ownerId, "conflicting_selections", { conflicts }, { ip });
+      throw badRequest(
+        "conflicting_selections",
+        `As seleções "${conflicts[0].names[0]}" e "${conflicts[0].names[1]}" são incompatíveis no mercado "${conflicts[0].marketName}". Escolha apenas uma opção compatível por mercado.`,
+        { conflicts }
+      );
     }
 
     // Revalidação de odds/mercados/eventos no servidor (item 5/8)

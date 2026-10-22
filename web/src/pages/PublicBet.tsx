@@ -7,6 +7,7 @@ interface Selection {
   key: string;
   name: string;
   odd: number;
+  conflictsWith?: number[];
 }
 
 interface Market {
@@ -14,6 +15,7 @@ interface Market {
   key: string;
   name: string;
   suspended: boolean;
+  singlePick?: boolean;
   selections: Selection[];
 }
 
@@ -51,6 +53,7 @@ export default function PublicBet() {
   const [clientCode, setClientCode] = useState("");
   const [leagueFilter, setLeagueFilter] = useState<string>("all");
   const [creating, setCreating] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -109,12 +112,30 @@ export default function PublicBet() {
     const next = new Map(selections);
     if (next.has(picked.selection.id)) {
       next.delete(picked.selection.id);
+      setNotice(null);
     } else {
+      // Mercados têm seleções incompatíveis (ex.: "Mais de 1.5" e "Menos de 1.5"
+      // no Total de Gols): escolher uma substitui automaticamente a outra.
+      const replaced: PickedSelection[] = [];
+      for (const [id, other] of next) {
+        const incompatible =
+          (picked.selection.conflictsWith?.includes(other.selection.id) ?? false) ||
+          (other.selection.conflictsWith?.includes(picked.selection.id) ?? false);
+        if (incompatible) {
+          next.delete(id);
+          replaced.push(other);
+        }
+      }
       if (next.size >= 10) {
         setError("Máximo de 10 seleções por cupom.");
         return;
       }
       next.set(picked.selection.id, picked);
+      setNotice(
+        replaced.length > 0
+          ? `Substituída "${replaced[0].selection.name}" do mercado "${replaced[0].marketName}" — o cupom não aceita opções incompatíveis do mesmo mercado.`
+          : null
+      );
     }
     setSelections(next);
     setCoupon(null);
@@ -123,6 +144,7 @@ export default function PublicBet() {
 
   async function createCoupon() {
     setError(null);
+    setNotice(null);
     setCreating(true);
     try {
       const selList = Array.from(selections.values()).map((p) => ({
@@ -321,7 +343,7 @@ export default function PublicBet() {
                 <div key={m.id} style={{ marginBottom: "1rem" }}>
                   <div style={{ fontSize: "0.8125rem", color: "var(--text-dim)", marginBottom: "0.5rem" }}>
                     {m.name}
-                    {m.suspended ? " — suspenso" : ""}
+                    {m.suspended ? " — suspenso" : !m.singlePick ? "" : m.selections.length > 1 ? " — escolha apenas 1 opção" : ""}
                   </div>
                   <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap" }}>
                     {m.selections.map((sel) => {
@@ -460,6 +482,12 @@ export default function PublicBet() {
                     </div>
                   )}
                 </div>
+
+                {notice && !stakeError && (
+                  <div style={{ background: "rgba(56,189,248,0.1)", border: "1px solid rgba(56,189,248,0.4)", color: "#7dd3fc", padding: "0.7rem", borderRadius: "6px", marginBottom: "1rem", fontSize: "0.8125rem" }}>
+                    {notice}
+                  </div>
+                )}
 
                 {stakeError && (
                   <div style={{ background: "rgba(239,68,68,0.1)", border: "1px solid rgba(239,68,68,0.4)", color: "#fca5a5", padding: "0.7rem", borderRadius: "6px", marginBottom: "1rem", fontSize: "0.8125rem" }}>

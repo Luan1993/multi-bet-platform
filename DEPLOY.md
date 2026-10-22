@@ -43,8 +43,18 @@ O auto-deploy está **desligado** (`autoDeployTrigger: off`) para não depender 
 Ou, com um API Key do Render no arquivo `.runtime/render.key`:
 
 ```bash
-node scripts/deploy-render.mjs
+node scripts/deploy-manual.mjs   # dispara o deploy e aguarda ficar ao vivo
 ```
+
+(Alternativa completa, que também recria recursos: `node scripts/deploy-render.mjs`.)
+
+## Estados inválidos no cupom (item 6/8)
+
+O servidor só aceita cupons com seleções **compatíveis**:
+
+- Mercados de resultado único (Resultado Final, Dupla Chance, Ambas Marcam, Empate Anula, Intervalo/Final) aceitam apenas **uma seleção por evento**.
+- No Total de Gols, escolhas impossíveis juntas são bloqueadas no servidor (ex.: “Mais de 1.5” com “Menos de 1.5”); combinações compatíveis de linhas distintas continuam permitidas (ex.: “Mais de 1.5” com “Menos de 3.5”).
+- Na página pública, escolher uma opção que conflita substitui automaticamente a anterior e exibe um aviso; tentativas diretas à API recebem HTTP 400 `conflicting_selections`.
 
 ## Limitações do plano free do Render
 

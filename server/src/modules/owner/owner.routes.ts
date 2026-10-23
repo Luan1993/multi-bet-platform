@@ -13,6 +13,7 @@ import { parseBody, intParam, dateParam, clientIp, userAgent } from "../../lib/v
 import { audit, riskEvent } from "../../lib/audit";
 import { requireAuth, requireOwner } from "../../middleware/auth";
 import { combineOdds, potentialPayoutCents } from "../../lib/money";
+import { evaluateCoupon, type EventResult, type CouponLeg } from "../../lib/settlement";
 import { formatCode, normalizeCouponCode } from "../../lib/codes";
 import { centsToNumber, toCsv } from "../../lib/csv";
 import { revalidateSelections, findSelectionConflicts, getProviderMeta } from "../odds/service";
@@ -313,6 +314,7 @@ async function loadCoupon(ownerId: number, codeParam: string) {
       selections: Array<{
         selectionId: number;
         odd: number;
+        providerSelectionKey?: string;
         selectionName: string;
         marketKey: string;
         marketName: string;
@@ -640,6 +642,63 @@ ownerRoutes.post("/coupons/:code/settle", async (req, res, next) => {
     });
 
     res.json({ ok: true, status: body.result, duePayoutCents: due, paidPayoutCents: paid });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Registro de pagamento de prêmio (cupom ganho, total ou parcial)
+// ---------------------------------------------------------------------------
+const paySchema = z.object({
+  amountCents: z.number().int().positive().optional(),
+  note: z.string().trim().max(500).optional(),
+});
+
+ownerRoutes.post("/coupons/:code/pay", async (req, res, next) => {
+  try {
+    const ownerId = ownerIdOf(req);
+    const body = parseBody(paySchema, req.body);
+    const { row } = await loadCoupon(ownerId, req.params.code);
+
+    if (row.status !== "won") {
+      throw conflict("invalid_status", "Somente cupons ganhos podem receber pagamento.");
+    }
+    const due = Number(row.due_payout_cents ?? 0);
+    const alreadyPaid = Number(row.paid_payout_cents ?? 0);
+    const remaining = due - alreadyPaid;
+    if (remaining <= 0) {
+      throw conflict("already_paid", "Este cupom já foi pago integralmente.");
+    }
+    const amount = body.amountCents ?? remaining;
+    if (amount > remaining) {
+      throw new AppError(422, "amount_exceeds_due", "O valor informado excede o prêmio ainda não pago.");
+    }
+
+    await withTransaction(async (client) => {
+      const upd = await client.query(
+        `UPDATE coupons SET paid_payout_cents = COALESCE(paid_payout_cents, 0) + $2, updated_at = now()
+          WHERE id = $1 AND status = 'won' AND COALESCE(paid_payout_cents, 0) + $2 <= due_payout_cents
+          RETURNING id`,
+        [row.id, amount]
+      );
+      if (!upd.rowCount) throw conflict("concurrency", "O pagamento já foi registrado. Recarregue o cupom.");
+      await client.query(
+        `INSERT INTO financial_movements (owner_id, coupon_id, type, amount_cents, is_demo, note, created_by)
+         VALUES ($2,$1,'prize_paid',$3,$4,$5,$6)`,
+        [row.id, ownerId, amount, row.is_demo, body.note ?? "pagamento de prêmio registrado pela operação", req.user!.id]
+      );
+      await audit({
+        ...auditCtx(req),
+        action: "coupon.pay",
+        entity: "coupon",
+        entityId: row.code,
+        before: { paidPayoutCents: alreadyPaid },
+        after: { paidPayoutCents: alreadyPaid + amount },
+      }, client);
+    });
+
+    res.json({ ok: true, paidPayoutCents: alreadyPaid + amount, duePayoutCents: due });
   } catch (err) {
     next(err);
   }
@@ -1410,6 +1469,421 @@ ownerRoutes.delete("/events/:id/odds", async (req, res, next) => {
       entityId: String(ev.id),
     });
     res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Resultado do evento e liquidação automática dos cupons
+// ---------------------------------------------------------------------------
+interface SettlementSummary {
+  won: number;
+  lost: number;
+  voided: number;
+  pending: number;
+  coupons: Array<{ code: string; status: string; duePayoutCents: number }>;
+}
+
+async function settleCouponsForFixture(
+  client: { query: import("pg").PoolClient["query"] },
+  ownerId: number,
+  fixtureId: string,
+  actor: { id: number; role: string },
+  note: string
+): Promise<SettlementSummary> {
+  const coupons = await client.query<{
+    id: string;
+    code: string;
+    stake_cents: string;
+    limit_applied_cents: string;
+    odds_snapshot: {
+      selections?: Array<{
+        odd?: number;
+        marketKey?: string;
+        providerSelectionKey?: string;
+        providerFixtureId?: string;
+      }>;
+    };
+  }>(
+    `SELECT id, code, stake_cents, limit_applied_cents, odds_snapshot
+       FROM coupons
+      WHERE owner_id = $1 AND status = 'accepted'
+        AND EXISTS (
+          SELECT 1 FROM jsonb_array_elements(odds_snapshot->'selections') s
+           WHERE s->>'providerFixtureId' = $2
+        )
+      FOR UPDATE`,
+    [ownerId, fixtureId]
+  );
+
+  const summary: SettlementSummary = { won: 0, lost: 0, voided: 0, pending: 0, coupons: [] };
+
+  for (const coupon of coupons.rows) {
+    const legs: CouponLeg[] = (coupon.odds_snapshot?.selections ?? [])
+      .filter((s) => s.providerFixtureId && s.marketKey && s.providerSelectionKey && Number(s.odd) > 1)
+      .map((s) => ({
+        providerFixtureId: String(s.providerFixtureId),
+        marketKey: String(s.marketKey),
+        providerSelectionKey: String(s.providerSelectionKey),
+        odd: Number(s.odd),
+      }));
+    if (legs.length === 0) {
+      summary.pending++;
+      continue;
+    }
+
+    const fixtureIds = [...new Set(legs.map((l) => l.providerFixtureId))];
+    const events = await client.query<{
+      provider_fixture_id: string;
+      home_score: number | null;
+      away_score: number | null;
+      cards_total: number | null;
+      corners_total: number | null;
+      shots_on_goal_total: number | null;
+      status: string;
+      result_final: boolean;
+    }>(
+      `SELECT provider_fixture_id, home_score, away_score, cards_total, corners_total,
+              shots_on_goal_total, status, result_final
+         FROM events
+        WHERE provider_fixture_id = ANY($1::text[]) AND result_final = TRUE`,
+      [fixtureIds]
+    );
+    const results = new Map<string, EventResult>();
+    for (const e of events.rows) {
+      results.set(e.provider_fixture_id, {
+        fixtureId: e.provider_fixture_id,
+        homeScore: e.home_score === null ? null : Number(e.home_score),
+        awayScore: e.away_score === null ? null : Number(e.away_score),
+        cardsTotal: e.cards_total === null ? null : Number(e.cards_total),
+        cornersTotal: e.corners_total === null ? null : Number(e.corners_total),
+        shotsOnGoalTotal:
+          e.shots_on_goal_total === null ? null : Number(e.shots_on_goal_total),
+        final: true,
+        void: e.status === "cancelled",
+      });
+    }
+
+    const evaluation = evaluateCoupon(
+      legs,
+      results,
+      Number(coupon.stake_cents),
+      Number(coupon.limit_applied_cents)
+    );
+    if (evaluation.status === "pending") {
+      summary.pending++;
+      continue;
+    }
+
+    const finalStatus = evaluation.status === "void" ? "cancelled" : evaluation.status;
+    const due = evaluation.status === "won" ? evaluation.duePayoutCents ?? 0 : 0;
+    const settlementNote =
+      evaluation.status === "void"
+        ? "liquidação automática: todas as seleções foram anuladas"
+        : `liquidação automática pelo resultado do evento (${note})`;
+
+    const upd = await client.query(
+      `UPDATE coupons
+          SET status = $2, due_payout_cents = $3, paid_payout_cents = 0,
+              settled_at = now(), settlement_note = $4,
+              cancel_reason = CASE WHEN $2 = 'cancelled' THEN $4 ELSE cancel_reason END,
+              cancelled_at = CASE WHEN $2 = 'cancelled' THEN now() ELSE cancelled_at END,
+              updated_at = now()
+        WHERE id = $1 AND status = 'accepted'`,
+      [coupon.id, finalStatus, due, settlementNote]
+    );
+    if (!upd.rowCount) continue;
+
+    await client.query(
+      `INSERT INTO coupon_status_history (coupon_id, from_status, to_status, changed_by, actor_role, reason)
+       VALUES ($1,'accepted',$2,$3,$4,$5)`,
+      [coupon.id, finalStatus, actor.id, actor.role, settlementNote]
+    );
+
+    if (evaluation.status === "won" && due > 0) {
+      await client.query(
+        `INSERT INTO financial_movements (owner_id, coupon_id, type, amount_cents, is_demo, note, created_by)
+         VALUES ($2,$1,'prize_due',$3,$4,$5,$6)`,
+        [coupon.id, ownerId, due, coupon.odds_snapshot ? true : true, "prêmio devido apurado automaticamente", actor.id]
+      );
+      summary.won++;
+    } else if (evaluation.status === "lost") {
+      summary.lost++;
+    } else {
+      // Estorno da stake: ajuste negativo no caixa.
+      await client.query(
+        `INSERT INTO financial_movements (owner_id, coupon_id, type, amount_cents, is_demo, note, created_by)
+         SELECT $2, $1, 'adjustment', -stake_cents, is_demo, 'estorno de stake (seleções anuladas)', $3
+           FROM coupons WHERE id = $1`,
+        [coupon.id, ownerId, actor.id]
+      );
+      summary.voided++;
+    }
+    summary.coupons.push({ code: coupon.code, status: finalStatus, duePayoutCents: due });
+  }
+
+  return summary;
+}
+
+const eventResultSchema = z
+  .object({
+    homeScore: z.number().int().min(0).max(99).optional(),
+    awayScore: z.number().int().min(0).max(99).optional(),
+    cardsTotal: z.number().int().min(0).max(99).nullable().optional(),
+    cornersTotal: z.number().int().min(0).max(99).nullable().optional(),
+    shotsOnGoalTotal: z.number().int().min(0).max(99).nullable().optional(),
+    void: z.boolean().optional(),
+    note: z.string().trim().max(500).optional(),
+  })
+  .refine((v) => v.void || (v.homeScore !== undefined && v.awayScore !== undefined), {
+    message: "Informe o placar final (ou marque o evento como anulado).",
+  });
+
+ownerRoutes.put("/events/:id/result", async (req, res, next) => {
+  try {
+    const ownerId = ownerIdOf(req);
+    const body = parseBody(eventResultSchema, req.body);
+    const ev = await queryOne<{
+      id: string;
+      provider_fixture_id: string;
+      result_final: boolean;
+    }>(`SELECT id, provider_fixture_id, result_final FROM events WHERE id = $1`, [req.params.id]);
+    if (!ev) throw notFound("Evento não encontrado.", "event_not_found");
+    if (ev.result_final) {
+      throw conflict("result_already_final", "Este evento já foi encerrado. O resultado não pode ser alterado.");
+    }
+
+    const isVoid = Boolean(body.void);
+    let summary: SettlementSummary = { won: 0, lost: 0, voided: 0, pending: 0, coupons: [] };
+
+    await withTransaction(async (client) => {
+      await client.query(
+        `UPDATE events
+            SET status = $2, home_score = $3, away_score = $4, cards_total = $5,
+                corners_total = $6, shots_on_goal_total = $7,
+                result_final = TRUE, resulted_at = now(), resulted_by = $8, result_note = $9,
+                updated_at = now()
+          WHERE id = $1`,
+        [
+          ev.id,
+          isVoid ? "cancelled" : "finished",
+          isVoid ? null : body.homeScore ?? null,
+          isVoid ? null : body.awayScore ?? null,
+          isVoid ? null : body.cardsTotal ?? null,
+          isVoid ? null : body.cornersTotal ?? null,
+          isVoid ? null : body.shotsOnGoalTotal ?? null,
+          req.user!.id,
+          body.note ?? (isVoid ? "evento anulado pela operação" : null),
+        ]
+      );
+
+      summary = await settleCouponsForFixture(
+        client,
+        ownerId,
+        ev.provider_fixture_id,
+        { id: req.user!.id, role: req.user!.role },
+        body.note ??
+          (isVoid
+            ? "evento anulado"
+            : `placar ${body.homeScore}x${body.awayScore}`)
+      );
+
+      await audit({
+        ...auditCtx(req),
+        action: "event.result_set",
+        entity: "events",
+        entityId: String(ev.id),
+        after: {
+          homeScore: isVoid ? null : body.homeScore,
+          awayScore: isVoid ? null : body.awayScore,
+          cardsTotal: body.cardsTotal ?? null,
+          cornersTotal: body.cornersTotal ?? null,
+          shotsOnGoalTotal: body.shotsOnGoalTotal ?? null,
+          void: isVoid,
+          settled: summary,
+        },
+      }, client);
+    });
+
+    res.json({
+      ok: true,
+      final: true,
+      void: isVoid,
+      settlement: summary,
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+ownerRoutes.get("/events/results", async (req, res, next) => {
+  try {
+    const ownerId = ownerIdOf(req);
+    const hours = Math.min(Math.max(Number(req.query.hours) || 72, 1), 168);
+    const rows = await query<{
+      id: string;
+      provider: string;
+      home_team_name: string;
+      away_team_name: string;
+      kickoff_at: Date;
+      status: string;
+      home_score: number | null;
+      away_score: number | null;
+      cards_total: number | null;
+      corners_total: number | null;
+      shots_on_goal_total: number | null;
+      result_final: boolean;
+      resulted_at: Date | null;
+      result_note: string | null;
+      competition_name: string | null;
+      open_coupons: number;
+    }>(
+      `SELECT e.id, e.provider, e.home_team_name, e.away_team_name, e.kickoff_at, e.status,
+              e.home_score, e.away_score, e.cards_total, e.corners_total, e.shots_on_goal_total,
+              e.result_final, e.resulted_at, e.result_note,
+              c.name AS competition_name,
+              (SELECT COUNT(*)::int FROM coupons cp
+                WHERE cp.owner_id = $1 AND cp.status = 'accepted'
+                  AND EXISTS (
+                    SELECT 1 FROM jsonb_array_elements(cp.odds_snapshot->'selections') s
+                     WHERE s->>'providerFixtureId' = e.provider_fixture_id
+                  )) AS open_coupons
+         FROM events e
+         LEFT JOIN competitions c ON c.id = e.competition_id
+        WHERE e.kickoff_at BETWEEN now() - make_interval(hours => $2) AND now() + interval '15 minutes'
+        ORDER BY e.result_final ASC, e.kickoff_at DESC
+        LIMIT 200`,
+      [ownerId, hours]
+    );
+
+    res.json({
+      hours,
+      items: rows.map((r) => ({
+        id: Number(r.id),
+        home: r.home_team_name,
+        away: r.away_team_name,
+        competition: r.competition_name,
+        provider: r.provider,
+        kickoffAt: new Date(r.kickoff_at).toISOString(),
+        status: r.status,
+        homeScore: r.home_score === null ? null : Number(r.home_score),
+        awayScore: r.away_score === null ? null : Number(r.away_score),
+        cardsTotal: r.cards_total === null ? null : Number(r.cards_total),
+        cornersTotal: r.corners_total === null ? null : Number(r.corners_total),
+        shotsOnGoalTotal:
+          r.shots_on_goal_total === null ? null : Number(r.shots_on_goal_total),
+        resultFinal: r.result_final,
+        resultedAt: r.resulted_at ? new Date(r.resulted_at).toISOString() : null,
+        resultNote: r.result_note,
+        openCoupons: Number(r.open_coupons),
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Exposição / risco: cupons abertos por evento e mercado
+// ---------------------------------------------------------------------------
+ownerRoutes.get("/risk", async (req, res, next) => {
+  try {
+    const ownerId = ownerIdOf(req);
+    const rows = await query<{
+      code: string;
+      stake_cents: string;
+      potential_payout_cents: string;
+      odds_snapshot: {
+        selections?: Array<{
+          marketKey?: string;
+          marketName?: string;
+          eventHome?: string;
+          eventAway?: string;
+          kickoffAt?: string;
+          providerFixtureId?: string;
+        }>;
+      };
+    }>(
+      `SELECT code, stake_cents, potential_payout_cents, odds_snapshot
+         FROM coupons WHERE owner_id = $1 AND status = 'accepted'
+        ORDER BY potential_payout_cents DESC LIMIT 5000`,
+      [ownerId]
+    );
+
+    const unpaid = await queryOne<{ due: string; count: number }>(
+      `SELECT COALESCE(SUM(due_payout_cents - COALESCE(paid_payout_cents,0)),0)::bigint AS due,
+              COUNT(*)::int AS count
+         FROM coupons
+        WHERE owner_id = $1 AND status = 'won'
+          AND due_payout_cents > COALESCE(paid_payout_cents,0)`,
+      [ownerId]
+    );
+
+    const byEvent = new Map<string, {
+      fixtureId: string;
+      event: string;
+      kickoffAt: string | null;
+      coupons: number;
+      stakeCents: number;
+      potentialCents: number;
+    }>();
+    const byMarket = new Map<string, { marketKey: string; marketName: string; selections: number; potentialCents: number }>();
+
+    let stakeCents = 0;
+    let potentialCents = 0;
+    for (const coupon of rows) {
+      const stake = Number(coupon.stake_cents);
+      const potential = Number(coupon.potential_payout_cents);
+      stakeCents += stake;
+      potentialCents += potential;
+
+      const seenEvents = new Set<string>();
+      for (const s of coupon.odds_snapshot?.selections ?? []) {
+        const fixtureId = s.providerFixtureId ? String(s.providerFixtureId) : "";
+        const marketKey = s.marketKey ? String(s.marketKey) : "unknown";
+        const marketName = s.marketName ? String(s.marketName) : marketKey;
+        if (fixtureId && !seenEvents.has(fixtureId)) {
+          seenEvents.add(fixtureId);
+          const key = fixtureId;
+          const current = byEvent.get(key) ?? {
+            fixtureId,
+            event: `${s.eventHome ?? "?"} x ${s.eventAway ?? "?"}`,
+            kickoffAt: s.kickoffAt ?? null,
+            coupons: 0,
+            stakeCents: 0,
+            potentialCents: 0,
+          };
+          current.coupons += 1;
+          current.stakeCents += stake;
+          current.potentialCents += potential;
+          byEvent.set(key, current);
+        }
+
+        const mKey = marketKey;
+        const market = byMarket.get(mKey) ?? {
+          marketKey,
+          marketName,
+          selections: 0,
+          potentialCents: 0,
+        };
+        market.selections += 1;
+        market.potentialCents += potential;
+        byMarket.set(mKey, market);
+      }
+    }
+
+    res.json({
+      totals: {
+        openCoupons: rows.length,
+        stakeCents,
+        potentialCents,
+        unpaidPrizesCents: Number(unpaid?.due ?? 0),
+        unpaidPrizesCount: Number(unpaid?.count ?? 0),
+      },
+      events: [...byEvent.values()].sort((a, b) => b.potentialCents - a.potentialCents),
+      markets: [...byMarket.values()].sort((a, b) => b.potentialCents - a.potentialCents),
+    });
   } catch (err) {
     next(err);
   }

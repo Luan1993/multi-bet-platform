@@ -31,6 +31,8 @@ export default function OwnerLayout() {
           <Link to="/owner" style={{ padding: "0.5rem", borderRadius: "6px" }}>Dashboard</Link>
           <Link to="/owner/cash" style={{ padding: "0.5rem", borderRadius: "6px" }}>Caixa</Link>
           <Link to="/owner/odds" style={{ padding: "0.5rem", borderRadius: "6px" }}>Odds dos jogos</Link>
+          <Link to="/owner/results" style={{ padding: "0.5rem", borderRadius: "6px" }}>Resultados</Link>
+          <Link to="/owner/risk" style={{ padding: "0.5rem", borderRadius: "6px" }}>Exposição / Risco</Link>
           <Link to="/owner/coupons" style={{ padding: "0.5rem", borderRadius: "6px" }}>Cupons</Link>
           <Link to="/owner/clients" style={{ padding: "0.5rem", borderRadius: "6px" }}>Clientes</Link>
           <Link to="/owner/reports" style={{ padding: "0.5rem", borderRadius: "6px" }}>Relatórios</Link>

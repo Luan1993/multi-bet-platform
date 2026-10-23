@@ -14,7 +14,8 @@
     "start:prod": "node scripts/deploy-start.cjs",
     "test": "npm run test -w server",
     "db:migrate": "npm run db:migrate -w server",
-    "db:seed": "npm run db:seed -w server"
+    "db:seed": "npm run db:seed -w server",
+    "backup": "node scripts/backup-db.mjs"
   },
   "engines": {
     "node": ">=20"

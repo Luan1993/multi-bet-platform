@@ -11,6 +11,7 @@ import { authRoutes } from "./modules/auth/auth.routes";
 import { adminRoutes } from "./modules/admin/admin.routes";
 import { ownerRoutes } from "./modules/owner/owner.routes";
 import { publicRoutes } from "./modules/public/public.routes";
+import { getPlatformDemoMode } from "./lib/platform";
 
 export interface AppOptions {
   /** Desativa rate limit (testes automatizados). */
@@ -61,8 +62,8 @@ export function createApp(options: AppOptions = {}): Express {
   app.use("/uploads", express.static(uploadsDir, { maxAge: "1d", immutable: true }));
 
   // Saúde do serviço (monitoramento)
-  app.get("/api/health", (_req, res) => {
-    res.json({ ok: true, ts: new Date().toISOString(), demoMode: config.demoMode });
+  app.get("/api/health", async (_req, res) => {
+    res.json({ ok: true, ts: new Date().toISOString(), demoMode: await getPlatformDemoMode() });
   });
 
   app.use("/api/auth", authRoutes);

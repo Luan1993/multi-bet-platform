@@ -420,6 +420,12 @@ export default function PublicBet() {
                   </div>
                 </div>
               ))}
+
+              {ev.markets.length === 0 && (
+                <div style={{ fontSize: "0.8125rem", color: "var(--text-dim)" }}>
+                  Odds indisponíveis para esta partida no momento.
+                </div>
+              )}
             </div>
           ))}
         </div>

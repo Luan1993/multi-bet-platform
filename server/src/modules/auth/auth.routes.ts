@@ -9,6 +9,7 @@ import { audit } from "../../lib/audit";
 import { requireAuth } from "../../middleware/auth";
 import { loginLimiter } from "../../middleware/rateLimit";
 import { config } from "../../config";
+import { getPlatformDemoMode } from "../../lib/platform";
 
 export const authRoutes = Router();
 
@@ -156,7 +157,7 @@ authRoutes.post("/login", loginLimiter, async (req, res, next) => {
               branding: await ownerBranding(user.owner_id),
             }
           : null,
-      demoMode: config.demoMode,
+      demoMode: await getPlatformDemoMode(),
     });
   } catch (err) {
     next(err);
@@ -201,7 +202,7 @@ authRoutes.get("/me", requireAuth, async (req, res, next) => {
         status: u.status,
       },
       owner,
-      demoMode: config.demoMode,
+      demoMode: await getPlatformDemoMode(),
     });
   } catch (err) {
     next(err);

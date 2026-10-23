@@ -10,7 +10,7 @@ import { requireAuth, requireOwner } from "../../middleware/auth";
 import { combineOdds, potentialPayoutCents } from "../../lib/money";
 import { formatCode, normalizeCouponCode } from "../../lib/codes";
 import { centsToNumber, toCsv } from "../../lib/csv";
-import { revalidateSelections, findSelectionConflicts } from "../odds/service";
+import { revalidateSelections, findSelectionConflicts, getProviderMeta } from "../odds/service";
 import { getEffectiveSettings } from "../public/public.routes";
 import { clientsRoutes } from "./clients.routes";
 
@@ -1151,4 +1151,156 @@ ownerRoutes.get("/audit", async (req, res, next) => {
 });
 
 // Clientes (base própria do tenant)
+// ---------------------------------------------------------------------------
+// Odds dos eventos (definição manual pelo proprietário)
+// ---------------------------------------------------------------------------
+// Permite operar com eventos reais mesmo sem um provedor de odds contratado.
+// As odds manuais ficam em um mercado próprio ("manual") e têm prioridade
+// sobre as odds do provedor para o mesmo evento.
+
+interface ManualOddRow {
+  id: string;
+  home_team_name: string;
+  away_team_name: string;
+  kickoff_at: Date;
+  status: string;
+  competition_name: string | null;
+  manual_market_id: string | null;
+  manual_suspended: boolean | null;
+  provider_market_id: string | null;
+  manual_selections: Array<{ key: string; name: string; odd: number }> | null;
+  provider_selections: Array<{ key: string; name: string; odd: number }> | null;
+}
+
+ownerRoutes.get("/events", async (req, res, next) => {
+  try {
+    const meta = await getProviderMeta();
+    const hours = Math.min(Math.max(Number(req.query.hours) || 72, 1), 168);
+    const rows = await query<ManualOddRow>(
+      `SELECT e.id, e.home_team_name, e.away_team_name, e.kickoff_at, e.status,
+              c.name AS competition_name,
+              mm.id AS manual_market_id, mm.suspended AS manual_suspended,
+              pm.id AS provider_market_id,
+              (SELECT json_agg(json_build_object('key', s.provider_selection_key, 'name', s.name, 'odd', s.odd::float8) ORDER BY s.id)
+                 FROM selections s WHERE s.market_id = mm.id) AS manual_selections,
+              (SELECT json_agg(json_build_object('key', s.provider_selection_key, 'name', s.name, 'odd', s.odd::float8) ORDER BY s.id)
+                 FROM selections s WHERE s.market_id = pm.id) AS provider_selections
+         FROM events e
+         LEFT JOIN competitions c ON c.id = e.competition_id
+         LEFT JOIN LATERAL (
+           SELECT m.id, m.suspended FROM markets m
+            WHERE m.event_id = e.id AND m.provider_market_id = 'manual' AND m.market_key = 'match_winner'
+            LIMIT 1
+         ) mm ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT m.id FROM markets m
+            WHERE m.event_id = e.id AND m.provider_market_id <> 'manual' AND m.market_key = 'match_winner'
+            LIMIT 1
+         ) pm ON TRUE
+        WHERE e.status IN ('scheduled','live')
+          AND e.kickoff_at BETWEEN now() - interval '2 hours' AND now() + make_interval(hours => $2)
+          AND ($1::text IS NULL OR e.provider = $1)
+        ORDER BY e.kickoff_at
+        LIMIT 200`,
+      [meta.id, hours]
+    );
+
+    res.json({
+      provider: meta,
+      items: rows.map((r) => ({
+        id: Number(r.id),
+        home: r.home_team_name,
+        away: r.away_team_name,
+        competition: r.competition_name,
+        kickoffAt: new Date(r.kickoff_at).toISOString(),
+        status: r.status,
+        manual: r.manual_market_id
+          ? {
+              marketId: Number(r.manual_market_id),
+              suspended: Boolean(r.manual_suspended),
+              selections: r.manual_selections ?? [],
+            }
+          : null,
+        providerOdds: r.provider_selections ?? [],
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
+const manualOddsSchema = z.object({
+  home: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
+  draw: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
+  away: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
+});
+
+ownerRoutes.put("/events/:id/odds", async (req, res, next) => {
+  try {
+    const body = parseBody(manualOddsSchema, req.body);
+    const ev = await queryOne<{ id: string; status: string }>(`SELECT id, status FROM events WHERE id = $1`, [
+      req.params.id,
+    ]);
+    if (!ev) throw notFound("Evento não encontrado.", "event_not_found");
+    if (ev.status !== "scheduled") {
+      throw badRequest("Só é possível definir odds de eventos agendados.", "event_not_scheduled");
+    }
+
+    const marketId = await withTransaction(async (client) => {
+      const market = await client.query<{ id: string }>(
+        `INSERT INTO markets (event_id, provider_market_id, market_key, name, suspended, sort_order, last_updated_at)
+         VALUES ($1, 'manual', 'match_winner', 'Resultado Final', FALSE, -1, now())
+         ON CONFLICT (event_id, provider_market_id, market_key)
+         DO UPDATE SET name = EXCLUDED.name, suspended = FALSE, last_updated_at = now()
+         RETURNING id`,
+        [ev.id]
+      );
+      const id = market.rows[0].id;
+      const selections: Array<[string, string, number]> = [
+        ["home", "Mandante", body.home],
+        ["draw", "Empate", body.draw],
+        ["away", "Visitante", body.away],
+      ];
+      for (const [key, name, odd] of selections) {
+        await client.query(
+          `INSERT INTO selections (market_id, provider_selection_key, name, odd, last_updated_at)
+           VALUES ($1,$2,$3,$4,now())
+           ON CONFLICT (market_id, provider_selection_key)
+           DO UPDATE SET name = EXCLUDED.name, odd = EXCLUDED.odd, last_updated_at = now()`,
+          [id, key, name, odd]
+        );
+      }
+      return id;
+    });
+
+    await audit({
+      ...auditCtx(req),
+      action: "odds.manual_set",
+      entity: "events",
+      entityId: String(ev.id),
+      after: { home: body.home, draw: body.draw, away: body.away },
+    });
+    res.json({ ok: true, marketId: Number(marketId) });
+  } catch (err) {
+    next(err);
+  }
+});
+
+ownerRoutes.delete("/events/:id/odds", async (req, res, next) => {
+  try {
+    const ev = await queryOne<{ id: string }>(`SELECT id FROM events WHERE id = $1`, [req.params.id]);
+    if (!ev) throw notFound("Evento não encontrado.", "event_not_found");
+    await query(`DELETE FROM markets WHERE event_id = $1 AND provider_market_id = 'manual'`, [ev.id]);
+    await audit({
+      ...auditCtx(req),
+      action: "odds.manual_remove",
+      entity: "events",
+      entityId: String(ev.id),
+    });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
 ownerRoutes.use("/clients", clientsRoutes);

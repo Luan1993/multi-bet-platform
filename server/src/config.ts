@@ -50,8 +50,13 @@ export const config = {
   },
 
   odds: {
-    provider: (process.env.ODDS_PROVIDER || "api-football") as "api-football" | "demo" | "none",
+    provider: (process.env.ODDS_PROVIDER || "api-football") as
+      | "api-football"
+      | "football-data"
+      | "demo"
+      | "none",
     apiKey: process.env.API_FOOTBALL_KEY || "",
+    footballDataKey: process.env.FOOTBALL_DATA_KEY || "",
     refreshMs: int(process.env.ODDS_REFRESH_MS, 10 * 60 * 1000),
     syncMaxFixtures: int(process.env.ODDS_SYNC_MAX_FIXTURES, 15),
     staleMinutes: int(process.env.ODDS_STALE_MINUTES, 30),

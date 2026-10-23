@@ -5,6 +5,7 @@ import { logger } from "../../lib/logger";
 import { conflictsBySelection, findConflictPairs, isSinglePickMarket } from "../../lib/markets";
 import { ApiFootballProvider } from "./apiFootball";
 import { DemoProvider } from "./demo";
+import { FootballDataProvider } from "./footballData";
 import { OddsProvider, ProviderError } from "./types";
 
 export * from "./types";
@@ -42,10 +43,11 @@ export async function resolveProvider(): Promise<OddsProvider | null> {
   if (cached && Date.now() - cached.at < PROVIDER_CACHE_MS) return cached.provider;
 
   let provider: OddsProvider | null = null;
-  const preferred = config.odds.provider; // 'api-football' | 'demo' | 'none'
-  const dbName = preferred === "demo" ? "demo" : "api-football";
+  const preferred = config.odds.provider; // 'api-football' | 'football-data' | 'demo' | 'none'
+  const dbName =
+    preferred === "demo" ? "demo" : preferred === "football-data" ? "football-data" : "api-football";
 
-  let apiKey = config.odds.apiKey;
+  let apiKey = preferred === "football-data" ? config.odds.footballDataKey : config.odds.apiKey;
   const row = await queryOne<{ provider: string; enabled: boolean; api_key: string | null }>(
     `SELECT provider, enabled, api_key FROM provider_configs WHERE provider = $1`,
     [dbName]
@@ -61,6 +63,8 @@ export async function resolveProvider(): Promise<OddsProvider | null> {
 
   if (preferred === "api-football") {
     if (apiKey) provider = new ApiFootballProvider(apiKey);
+  } else if (preferred === "football-data") {
+    if (apiKey) provider = new FootballDataProvider(apiKey);
   } else if (preferred === "demo") {
     provider = new DemoProvider();
   }
@@ -147,6 +151,10 @@ export async function syncAll(): Promise<SyncResult> {
         WHERE e.provider = $1
           AND e.status = 'scheduled'
           AND e.kickoff_at BETWEEN now() AND now() + interval '36 hours'
+          AND NOT EXISTS (
+            SELECT 1 FROM markets m3
+             WHERE m3.event_id = e.id AND m3.provider_market_id = 'manual'
+          )
           AND (
             NOT EXISTS (SELECT 1 FROM markets m WHERE m.event_id = e.id)
             OR (
@@ -172,6 +180,12 @@ export async function syncAll(): Promise<SyncResult> {
       } catch (err) {
         if (err instanceof ProviderError && err.code === "quota") {
           logger.warn("odds_sync_quota", { message: err.message });
+          break;
+        }
+        if (err instanceof ProviderError && err.code === "invalid" && !err.retryable) {
+          // Configuração do provedor (ex.: pacote de odds inativo) — não adianta
+          // repetir a chamada para todos os eventos da rodada.
+          logger.warn("odds_sync_provider_config", { message: err.message });
           break;
         }
         logger.warn("odds_sync_fixture_error", {
@@ -202,7 +216,11 @@ export async function syncOddsForFixtures(providerFixtureIds: string[]): Promise
   try {
     for (const fixtureId of providerFixtureIds) {
       const ev = await queryOne<{ id: string }>(
-        `SELECT id FROM events WHERE provider = $1 AND provider_fixture_id = $2`,
+        `SELECT e.id FROM events e
+          WHERE e.provider = $1 AND e.provider_fixture_id = $2
+            AND NOT EXISTS (
+              SELECT 1 FROM markets m WHERE m.event_id = e.id AND m.provider_market_id = 'manual'
+            )`,
         [provider.id, fixtureId]
       );
       if (!ev) continue;
@@ -428,6 +446,7 @@ export async function getPublicEvents(windowHours = 48): Promise<{
     market_key: string;
     name: string;
     suspended: boolean;
+    provider_market_id: string;
     last_updated_at: Date | null;
     sel_id: string;
     sel_key: string;
@@ -435,7 +454,7 @@ export async function getPublicEvents(windowHours = 48): Promise<{
     odd: string;
     sel_updated: Date | null;
   }>(
-    `SELECT m.id, m.event_id, m.market_key, m.name, m.suspended, m.last_updated_at,
+    `SELECT m.id, m.event_id, m.market_key, m.name, m.suspended, m.provider_market_id, m.last_updated_at,
             sel.id AS sel_id, sel.provider_selection_key AS sel_key, sel.name AS sel_name,
             sel.odd, sel.last_updated_at AS sel_updated
        FROM markets m
@@ -474,7 +493,13 @@ export async function getPublicEvents(windowHours = 48): Promise<{
     if (!ev) continue;
     let market = ev.markets.find((m) => m.id === Number(row.id));
     if (!market) {
-      const marketStale = row.last_updated_at ? now - new Date(row.last_updated_at).getTime() > staleMs : true;
+      // Odds definidas manualmente pelo proprietário não "expiram".
+      const marketStale =
+        row.provider_market_id === "manual"
+          ? false
+          : row.last_updated_at
+            ? now - new Date(row.last_updated_at).getTime() > staleMs
+            : true;
       market = {
         id: Number(row.id),
         key: row.market_key,
@@ -486,7 +511,12 @@ export async function getPublicEvents(windowHours = 48): Promise<{
       };
       ev.markets.push(market);
     }
-    const selStale = row.sel_updated ? now - new Date(row.sel_updated).getTime() > staleMs : true;
+    const selStale =
+      row.provider_market_id === "manual"
+        ? false
+        : row.sel_updated
+          ? now - new Date(row.sel_updated).getTime() > staleMs
+          : true;
     market.selections.push({
       id: Number(row.sel_id),
       key: row.sel_key,
@@ -606,13 +636,15 @@ export async function revalidateSelections(
     sel_updated: Date | null;
     market_id: string;
     market_suspended: boolean;
+    market_provider: string;
     market_updated: Date | null;
     event_id: string;
     event_status: string;
     provider_fixture_id: string;
   }>(
     `SELECT sel.id AS selection_id, sel.odd, sel.last_updated_at AS sel_updated,
-            m.id AS market_id, m.suspended AS market_suspended, m.last_updated_at AS market_updated,
+            m.id AS market_id, m.suspended AS market_suspended, m.provider_market_id AS market_provider,
+            m.last_updated_at AS market_updated,
             e.id AS event_id, e.status AS event_status, e.provider_fixture_id
        FROM selections sel
        JOIN markets m ON m.id = sel.market_id
@@ -632,7 +664,9 @@ export async function revalidateSelections(
       rows
         .filter(
           (r) =>
-            r.sel_updated && now - new Date(r.sel_updated).getTime() > staleMs
+            r.market_provider !== "manual" &&
+            r.sel_updated &&
+            now - new Date(r.sel_updated).getTime() > staleMs
         )
         .map((r) => r.provider_fixture_id)
     ),
@@ -688,7 +722,7 @@ export async function revalidateSelections(
       changed: Math.abs(currentOdd - e.expectedOdd) > 0.001,
       suspended: r.market_suspended || r.event_status !== "scheduled",
       eventStatus: r.event_status,
-      marketStale: isStale,
+      marketStale: r.market_provider === "manual" ? false : isStale,
       providerFixtureId: r.provider_fixture_id,
     };
   });

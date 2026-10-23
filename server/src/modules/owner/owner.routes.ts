@@ -4,6 +4,11 @@ import QRCode from "qrcode";
 import { config } from "../../config";
 import { query, queryOne, withTransaction } from "../../db/pool";
 import { badRequest, conflict, notFound, providerUnavailable, AppError } from "../../lib/errors";
+import {
+  ManualMarketError,
+  normalizeManualMarkets,
+  type ManualMarketInput,
+} from "../../lib/manualMarkets";
 import { parseBody, intParam, dateParam, clientIp, userAgent } from "../../lib/validate";
 import { audit, riskEvent } from "../../lib/audit";
 import { requireAuth, requireOwner } from "../../middleware/auth";
@@ -1158,6 +1163,14 @@ ownerRoutes.get("/audit", async (req, res, next) => {
 // As odds manuais ficam em um mercado próprio ("manual") e têm prioridade
 // sobre as odds do provedor para o mesmo evento.
 
+interface EventMarketRow {
+  marketId?: number;
+  marketKey: string;
+  name: string;
+  suspended?: boolean;
+  selections: Array<{ key: string; name: string; odd: number }>;
+}
+
 interface ManualOddRow {
   id: string;
   home_team_name: string;
@@ -1165,11 +1178,8 @@ interface ManualOddRow {
   kickoff_at: Date;
   status: string;
   competition_name: string | null;
-  manual_market_id: string | null;
-  manual_suspended: boolean | null;
-  provider_market_id: string | null;
-  manual_selections: Array<{ key: string; name: string; odd: number }> | null;
-  provider_selections: Array<{ key: string; name: string; odd: number }> | null;
+  manual_markets: EventMarketRow[] | null;
+  provider_markets: EventMarketRow[] | null;
 }
 
 ownerRoutes.get("/events", async (req, res, next) => {
@@ -1179,24 +1189,36 @@ ownerRoutes.get("/events", async (req, res, next) => {
     const rows = await query<ManualOddRow>(
       `SELECT e.id, e.home_team_name, e.away_team_name, e.kickoff_at, e.status,
               c.name AS competition_name,
-              mm.id AS manual_market_id, mm.suspended AS manual_suspended,
-              pm.id AS provider_market_id,
-              (SELECT json_agg(json_build_object('key', s.provider_selection_key, 'name', s.name, 'odd', s.odd::float8) ORDER BY s.id)
-                 FROM selections s WHERE s.market_id = mm.id) AS manual_selections,
-              (SELECT json_agg(json_build_object('key', s.provider_selection_key, 'name', s.name, 'odd', s.odd::float8) ORDER BY s.id)
-                 FROM selections s WHERE s.market_id = pm.id) AS provider_selections
+              man.markets AS manual_markets,
+              prov.markets AS provider_markets
          FROM events e
          LEFT JOIN competitions c ON c.id = e.competition_id
          LEFT JOIN LATERAL (
-           SELECT m.id, m.suspended FROM markets m
-            WHERE m.event_id = e.id AND m.provider_market_id = 'manual' AND m.market_key = 'match_winner'
-            LIMIT 1
-         ) mm ON TRUE
+           SELECT json_agg(json_build_object(
+                    'marketId', m.id,
+                    'marketKey', m.market_key,
+                    'name', m.name,
+                    'suspended', m.suspended,
+                    'selections', (
+                      SELECT json_agg(json_build_object('key', s.provider_selection_key, 'name', s.name, 'odd', s.odd::float8) ORDER BY s.id)
+                        FROM selections s WHERE s.market_id = m.id
+                    )
+                  ) ORDER BY m.sort_order, m.id) AS markets
+             FROM markets m
+            WHERE m.event_id = e.id AND m.provider_market_id = 'manual'
+         ) man ON TRUE
          LEFT JOIN LATERAL (
-           SELECT m.id FROM markets m
-            WHERE m.event_id = e.id AND m.provider_market_id <> 'manual' AND m.market_key = 'match_winner'
-            LIMIT 1
-         ) pm ON TRUE
+           SELECT json_agg(json_build_object(
+                    'marketKey', m.market_key,
+                    'name', m.name,
+                    'selections', (
+                      SELECT json_agg(json_build_object('key', s.provider_selection_key, 'name', s.name, 'odd', s.odd::float8) ORDER BY s.id)
+                        FROM selections s WHERE s.market_id = m.id
+                    )
+                  ) ORDER BY m.sort_order, m.id) AS markets
+             FROM markets m
+            WHERE m.event_id = e.id AND m.provider_market_id <> 'manual'
+         ) prov ON TRUE
         WHERE e.status IN ('scheduled','live')
           AND e.kickoff_at BETWEEN now() - interval '2 hours' AND now() + make_interval(hours => $2)
           AND ($1::text IS NULL OR e.provider = $1)
@@ -1207,33 +1229,61 @@ ownerRoutes.get("/events", async (req, res, next) => {
 
     res.json({
       provider: meta,
-      items: rows.map((r) => ({
-        id: Number(r.id),
-        home: r.home_team_name,
-        away: r.away_team_name,
-        competition: r.competition_name,
-        kickoffAt: new Date(r.kickoff_at).toISOString(),
-        status: r.status,
-        manual: r.manual_market_id
-          ? {
-              marketId: Number(r.manual_market_id),
-              suspended: Boolean(r.manual_suspended),
-              selections: r.manual_selections ?? [],
-            }
-          : null,
-        providerOdds: r.provider_selections ?? [],
-      })),
+      items: rows.map((r) => {
+        const manualMarkets = r.manual_markets ?? [];
+        const manualKeys = new Set(manualMarkets.map((m) => m.marketKey));
+        const providerMarkets = (r.provider_markets ?? []).filter(
+          (m) => !manualKeys.has(m.marketKey)
+        );
+        const manualWinner = manualMarkets.find((m) => m.marketKey === "match_winner");
+        return {
+          id: Number(r.id),
+          home: r.home_team_name,
+          away: r.away_team_name,
+          competition: r.competition_name,
+          kickoffAt: new Date(r.kickoff_at).toISOString(),
+          status: r.status,
+          manualMarkets,
+          providerMarkets,
+          // Campos mantidos por compatibilidade com versões anteriores do painel.
+          manual: manualWinner
+            ? {
+                marketId: Number(manualWinner.marketId),
+                suspended: Boolean(manualWinner.suspended),
+                selections: manualWinner.selections,
+              }
+            : null,
+          providerOdds:
+            providerMarkets.find((m) => m.marketKey === "match_winner")?.selections ?? [],
+        };
+      }),
     });
   } catch (err) {
     next(err);
   }
 });
 
-const manualOddsSchema = z.object({
-  home: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
-  draw: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
-  away: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
+const manualSelectionSchema = z.object({
+  key: z.string().trim().min(1, "Seleção inválida.").max(40),
+  odd: z.number().min(1.01, "Odd mínima é 1.01.").max(1000, "Odd máxima é 1000."),
 });
+
+const manualMarketSchema = z.object({
+  marketKey: z.string().trim().min(1).max(60),
+  selections: z.array(manualSelectionSchema).min(1).max(12),
+});
+
+const manualOddsSchema = z.union([
+  // Formato antigo (apenas Resultado Final) — mantido por compatibilidade.
+  z.object({
+    home: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
+    draw: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
+    away: z.number().min(1.01, "Odd mínima é 1.01.").max(1000),
+  }),
+  z.object({
+    markets: z.array(manualMarketSchema).max(5),
+  }),
+]);
 
 ownerRoutes.put("/events/:id/odds", async (req, res, next) => {
   try {
@@ -1246,31 +1296,83 @@ ownerRoutes.put("/events/:id/odds", async (req, res, next) => {
       throw badRequest("Só é possível definir odds de eventos agendados.", "event_not_scheduled");
     }
 
-    const marketId = await withTransaction(async (client) => {
-      const market = await client.query<{ id: string }>(
-        `INSERT INTO markets (event_id, provider_market_id, market_key, name, suspended, sort_order, last_updated_at)
-         VALUES ($1, 'manual', 'match_winner', 'Resultado Final', FALSE, -1, now())
-         ON CONFLICT (event_id, provider_market_id, market_key)
-         DO UPDATE SET name = EXCLUDED.name, suspended = FALSE, last_updated_at = now()
-         RETURNING id`,
-        [ev.id]
-      );
-      const id = market.rows[0].id;
-      const selections: Array<[string, string, number]> = [
-        ["home", "Mandante", body.home],
-        ["draw", "Empate", body.draw],
-        ["away", "Visitante", body.away],
-      ];
-      for (const [key, name, odd] of selections) {
+    const input: ManualMarketInput[] =
+      "markets" in body
+        ? body.markets
+        : [
+            {
+              marketKey: "match_winner",
+              selections: [
+                { key: "home", odd: body.home },
+                { key: "draw", odd: body.draw },
+                { key: "away", odd: body.away },
+              ],
+            },
+          ];
+
+    let markets;
+    try {
+      markets = normalizeManualMarkets(input);
+    } catch (err) {
+      if (err instanceof ManualMarketError) throw badRequest("invalid_odds", err.message);
+      throw err;
+    }
+
+    const marketKeys = markets.map((m) => m.marketKey);
+
+    await withTransaction(async (client) => {
+      // O PUT substitui o conjunto de odds manuais do evento.
+      if (marketKeys.length === 0) {
         await client.query(
-          `INSERT INTO selections (market_id, provider_selection_key, name, odd, last_updated_at)
-           VALUES ($1,$2,$3,$4,now())
-           ON CONFLICT (market_id, provider_selection_key)
-           DO UPDATE SET name = EXCLUDED.name, odd = EXCLUDED.odd, last_updated_at = now()`,
-          [id, key, name, odd]
+          `DELETE FROM markets WHERE event_id = $1 AND provider_market_id = 'manual'`,
+          [ev.id]
+        );
+      } else {
+        await client.query(
+          `DELETE FROM markets
+            WHERE event_id = $1 AND provider_market_id = 'manual'
+              AND market_key <> ALL($2::text[])`,
+          [ev.id, marketKeys]
+        );
+        // Manual tem prioridade: remove a versão do provedor para não duplicar
+        // o mesmo mercado na página pública.
+        await client.query(
+          `DELETE FROM markets
+            WHERE event_id = $1 AND provider_market_id <> 'manual'
+              AND market_key = ANY($2::text[])`,
+          [ev.id, marketKeys]
         );
       }
-      return id;
+
+      for (const market of markets) {
+        const marketRow = await client.query<{ id: string }>(
+          `INSERT INTO markets (event_id, provider_market_id, market_key, name, suspended, sort_order, last_updated_at)
+           VALUES ($1, 'manual', $2, $3, FALSE, $4, now())
+           ON CONFLICT (event_id, provider_market_id, market_key)
+           DO UPDATE SET name = EXCLUDED.name, suspended = FALSE,
+             sort_order = EXCLUDED.sort_order, last_updated_at = now()
+           RETURNING id`,
+          [ev.id, market.marketKey, market.name, market.sortOrder]
+        );
+        const marketId = marketRow.rows[0].id;
+        const selectionKeys = market.selections.map((s) => s.key);
+
+        await client.query(
+          `DELETE FROM selections
+            WHERE market_id = $1 AND provider_selection_key <> ALL($2::text[])`,
+          [marketId, selectionKeys]
+        );
+
+        for (const sel of market.selections) {
+          await client.query(
+            `INSERT INTO selections (market_id, provider_selection_key, name, odd, last_updated_at)
+             VALUES ($1,$2,$3,$4,now())
+             ON CONFLICT (market_id, provider_selection_key)
+             DO UPDATE SET name = EXCLUDED.name, odd = EXCLUDED.odd, last_updated_at = now()`,
+            [marketId, sel.key, sel.name, sel.odd]
+          );
+        }
+      }
     });
 
     await audit({
@@ -1278,9 +1380,19 @@ ownerRoutes.put("/events/:id/odds", async (req, res, next) => {
       action: "odds.manual_set",
       entity: "events",
       entityId: String(ev.id),
-      after: { home: body.home, draw: body.draw, away: body.away },
+      after: {
+        markets: markets.map((m) => ({ marketKey: m.marketKey, selections: m.selections })),
+      },
     });
-    res.json({ ok: true, marketId: Number(marketId) });
+
+    res.json({
+      ok: true,
+      markets: markets.map((m) => ({
+        marketKey: m.marketKey,
+        name: m.name,
+        selections: m.selections,
+      })),
+    });
   } catch (err) {
     next(err);
   }

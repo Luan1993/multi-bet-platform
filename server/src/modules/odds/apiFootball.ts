@@ -51,6 +51,15 @@ function mapMarket(betName: string): { marketKey: string; name: string } | null 
   if (n === "match winner" || n === "home/away") return { marketKey: "match_winner", name: "Resultado Final" };
   if (n === "double chance") return { marketKey: "double_chance", name: "Dupla Chance" };
   if (n === "goals over/under") return { marketKey: "goals_over_under", name: "Total de Gols" };
+  if (n === "cards over/under" || n === "cards over under" || n === "total cards") {
+    return { marketKey: "cards_over_under", name: "Total de Cartões" };
+  }
+  if (n === "corners over/under" || n === "corners over under" || n === "total corners") {
+    return { marketKey: "corners_over_under", name: "Total de Escanteios" };
+  }
+  if (n.includes("shots on goal") || n.includes("shots on target")) {
+    return { marketKey: "shots_on_goal_over_under", name: "Chutes a Gol" };
+  }
   if (n === "both teams score") return { marketKey: "both_teams_score", name: "Ambas Marcam" };
   if (n === "draw no bet") return { marketKey: "draw_no_bet", name: "Empate Anula" };
   if (n === "ht/ft double") return { marketKey: "ht_ft", name: "Intervalo/Final" };
@@ -89,15 +98,26 @@ const SELECTION_MAP: Record<string, Record<string, { key: string; name: string }
   },
 };
 
+const OVER_UNDER_UNITS: Record<string, string> = {
+  goals_over_under: "gols",
+  cards_over_under: "cartões",
+  corners_over_under: "escanteios",
+  shots_on_goal_over_under: "chutes a gol",
+};
+
 function mapSelection(marketKey: string, apiValue: string): { key: string; name: string } | null {
   const v = apiValue.toLowerCase().trim();
-  if (marketKey === "goals_over_under") {
+  const unit = OVER_UNDER_UNITS[marketKey];
+  if (unit) {
     // Valores como "Over 2.5" / "Under 2.5"
-    const m = /^(over|under)\s*([0-9]+(?:\.[05])?)$/.exec(v);
+    const m = /^(over|under)\s*([0-9]+(?:\.[0-9]{1,2})?)$/.exec(v);
     if (m) {
       const side = m[1] === "over" ? "over" : "under";
       const line = Number(m[2]);
-      return { key: `${side}_${line}`, name: `${side === "over" ? "Mais" : "Menos"} de ${m[2]} gols` };
+      return {
+        key: `${side}_${line}`,
+        name: `${side === "over" ? "Mais" : "Menos"} de ${m[2]} ${unit}`,
+      };
     }
     return null;
   }

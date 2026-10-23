@@ -185,15 +185,15 @@ export async function syncAll(): Promise<SyncResult> {
         WHERE e.provider = $1
           AND e.status = 'scheduled'
           AND e.kickoff_at BETWEEN now() AND now() + interval '36 hours'
-          AND NOT EXISTS (
-            SELECT 1 FROM markets m3
-             WHERE m3.event_id = e.id AND m3.provider_market_id = 'manual'
-          )
           AND (
-            NOT EXISTS (SELECT 1 FROM markets m WHERE m.event_id = e.id)
+            NOT EXISTS (
+              SELECT 1 FROM markets m
+               WHERE m.event_id = e.id AND m.provider_market_id <> 'manual'
+            )
             OR (
               SELECT COALESCE(MAX(m2.last_updated_at), TIMESTAMPTZ 'epoch')
-                FROM markets m2 WHERE m2.event_id = e.id
+                FROM markets m2
+               WHERE m2.event_id = e.id AND m2.provider_market_id <> 'manual'
             ) < now() - make_interval(secs => $2)
           )
         ORDER BY e.kickoff_at
@@ -251,10 +251,7 @@ export async function syncOddsForFixtures(providerFixtureIds: string[]): Promise
     for (const fixtureId of providerFixtureIds) {
       const ev = await queryOne<{ id: string }>(
         `SELECT e.id FROM events e
-          WHERE e.provider = $1 AND e.provider_fixture_id = $2
-            AND NOT EXISTS (
-              SELECT 1 FROM markets m WHERE m.event_id = e.id AND m.provider_market_id = 'manual'
-            )`,
+          WHERE e.provider = $1 AND e.provider_fixture_id = $2`,
         [provider.id, fixtureId]
       );
       if (!ev) continue;
@@ -352,6 +349,14 @@ async function upsertOdds(
   await withTransaction(async (client) => {
     for (let i = 0; i < markets.length; i++) {
       const m = markets[i];
+      // Mercados com odds manuais têm prioridade e não são sobrescritos pelo provedor.
+      const manual = await client.query(
+        `SELECT 1 FROM markets
+          WHERE event_id = $1 AND provider_market_id = 'manual' AND market_key = $2
+          LIMIT 1`,
+        [eventId, m.marketKey]
+      );
+      if ((manual.rowCount ?? 0) > 0) continue;
       // Preserva o horário da cotação na origem (importante para provedores
       // que usam cache). Sem `updatedAt`, usa o momento da gravação.
       const quotedAt =
@@ -500,7 +505,15 @@ export async function getPublicEvents(windowHours = 48): Promise<{
        FROM markets m
        JOIN selections sel ON sel.market_id = m.id
       WHERE m.event_id = ANY($1::bigint[])
-      ORDER BY m.sort_order, sel.id`,
+      ORDER BY CASE m.market_key
+                 WHEN 'match_winner' THEN 0
+                 WHEN 'goals_over_under' THEN 1
+                 WHEN 'cards_over_under' THEN 2
+                 WHEN 'corners_over_under' THEN 3
+                 WHEN 'shots_on_goal_over_under' THEN 4
+                 ELSE 5
+               END,
+               m.sort_order, sel.id`,
     [ids]
   );
 

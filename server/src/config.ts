@@ -53,10 +53,26 @@ export const config = {
     provider: (process.env.ODDS_PROVIDER || "api-football") as
       | "api-football"
       | "football-data"
+      | "the-odds-api"
       | "demo"
       | "none",
     apiKey: process.env.API_FOOTBALL_KEY || "",
     footballDataKey: process.env.FOOTBALL_DATA_KEY || "",
+    theOddsApiKey: process.env.THE_ODDS_API_KEY || "",
+    // Ligas e mercados consultados na The Odds API. Cada mercado consome
+    // 1 crédito por região a cada sincronização — no plano grátis (500/mês)
+    // mantenha poucas ligas e um cache alto.
+    theOddsApiSports: (process.env.THE_ODDS_API_SPORTS ||
+      "soccer_brazil_campeonato,soccer_conmebol_copa_libertadores,soccer_epl")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    theOddsApiMarkets: (process.env.THE_ODDS_API_MARKETS || "h2h,totals")
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean),
+    theOddsApiRegions: process.env.THE_ODDS_API_REGIONS || "eu",
+    theOddsApiCacheMinutes: int(process.env.THE_ODDS_API_CACHE_MINUTES, 540),
     refreshMs: int(process.env.ODDS_REFRESH_MS, 10 * 60 * 1000),
     syncMaxFixtures: int(process.env.ODDS_SYNC_MAX_FIXTURES, 15),
     staleMinutes: int(process.env.ODDS_STALE_MINUTES, 30),

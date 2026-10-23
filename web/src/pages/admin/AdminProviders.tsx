@@ -155,7 +155,15 @@ export default function AdminProviders() {
                 <td style={tdStyle}>
                   <div style={{ fontWeight: 600 }}>{row.provider}</div>
                   <div style={{ color: "var(--text-dim)", fontSize: "0.75rem" }}>
-                    {row.provider === "demo" ? "Dados simulados" : row.provider === "api-football" ? "API-Football v3" : "Integração"}
+                    {row.provider === "demo"
+                      ? "Dados simulados"
+                      : row.provider === "api-football"
+                        ? "API-Football v3"
+                        : row.provider === "football-data"
+                          ? "football-data.org"
+                          : row.provider === "the-odds-api"
+                            ? "The Odds API (odds automáticas)"
+                            : "Integração"}
                   </div>
                 </td>
                 <td style={tdStyle}>

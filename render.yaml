@@ -15,9 +15,16 @@ services:
       - key: NODE_VERSION
         value: 22.14.0
       - key: DEMO_MODE
-        value: "true"
+        value: "false"
       - key: ODDS_PROVIDER
-        value: demo
+        value: the-odds-api
+      - key: THE_ODDS_API_CACHE_MINUTES
+        value: "540"
+      - key: ODDS_STALE_MINUTES
+        value: "600"
+      # Informe no painel do Render (o plano grátis tem 500 créditos/mês).
+      - key: THE_ODDS_API_KEY
+        sync: false
       # Segredos gerados pelo Render. Veja os valores no painel do serviço.
       - key: SESSION_SECRET
         generateValue: true

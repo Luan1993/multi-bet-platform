@@ -6,6 +6,7 @@ import { conflictsBySelection, findConflictPairs, isSinglePickMarket } from "../
 import { ApiFootballProvider } from "./apiFootball";
 import { DemoProvider } from "./demo";
 import { FootballDataProvider } from "./footballData";
+import { TheOddsApiProvider, theOddsApiOptionsFromConfig } from "./theOddsApi";
 import { OddsProvider, ProviderError } from "./types";
 
 export * from "./types";
@@ -43,11 +44,23 @@ export async function resolveProvider(): Promise<OddsProvider | null> {
   if (cached && Date.now() - cached.at < PROVIDER_CACHE_MS) return cached.provider;
 
   let provider: OddsProvider | null = null;
-  const preferred = config.odds.provider; // 'api-football' | 'football-data' | 'demo' | 'none'
+  // 'api-football' | 'football-data' | 'the-odds-api' | 'demo' | 'none'
+  const preferred = config.odds.provider;
   const dbName =
-    preferred === "demo" ? "demo" : preferred === "football-data" ? "football-data" : "api-football";
+    preferred === "demo"
+      ? "demo"
+      : preferred === "football-data"
+        ? "football-data"
+        : preferred === "the-odds-api"
+          ? "the-odds-api"
+          : "api-football";
 
-  let apiKey = preferred === "football-data" ? config.odds.footballDataKey : config.odds.apiKey;
+  let apiKey =
+    preferred === "football-data"
+      ? config.odds.footballDataKey
+      : preferred === "the-odds-api"
+        ? config.odds.theOddsApiKey
+        : config.odds.apiKey;
   const row = await queryOne<{ provider: string; enabled: boolean; api_key: string | null }>(
     `SELECT provider, enabled, api_key FROM provider_configs WHERE provider = $1`,
     [dbName]
@@ -65,6 +78,8 @@ export async function resolveProvider(): Promise<OddsProvider | null> {
     if (apiKey) provider = new ApiFootballProvider(apiKey);
   } else if (preferred === "football-data") {
     if (apiKey) provider = new FootballDataProvider(apiKey);
+  } else if (preferred === "the-odds-api") {
+    if (apiKey) provider = new TheOddsApiProvider(apiKey, theOddsApiOptionsFromConfig());
   } else if (preferred === "demo") {
     provider = new DemoProvider();
   }
@@ -137,6 +152,25 @@ export async function syncAll(): Promise<SyncResult> {
 
   state.syncing = true;
   try {
+    // Provedores com cota muito baixa (The Odds API: 500 créditos/mês) usam
+    // um intervalo longo entre sincronizações. O controle fica no banco para
+    // sobreviver a reinícios/cold starts e não queimar a cota à toa.
+    if (!provider.isDemo) {
+      const intervalMs =
+        provider.id === "the-odds-api"
+          ? config.odds.theOddsApiCacheMinutes * 60_000
+          : config.odds.refreshMs;
+      const last = await queryOne<{ at: Date | null }>(
+        `SELECT MAX(last_synced_at) AS at FROM events WHERE provider = $1`,
+        [provider.id]
+      ).catch(() => null);
+      if (last?.at && Date.now() - new Date(last.at).getTime() < intervalMs) {
+        state.lastSyncAt = new Date(last.at);
+        state.lastError = null;
+        return { synced: true, events: 0, oddsFixtures: 0 };
+      }
+    }
+
     const events = await provider.fetchUpcomingEvents(2);
     let count = 0;
     for (const ev of events) {
@@ -318,13 +352,18 @@ async function upsertOdds(
   await withTransaction(async (client) => {
     for (let i = 0; i < markets.length; i++) {
       const m = markets[i];
+      // Preserva o horário da cotação na origem (importante para provedores
+      // que usam cache). Sem `updatedAt`, usa o momento da gravação.
+      const quotedAt =
+        m.updatedAt && Number.isFinite(m.updatedAt.getTime()) ? m.updatedAt : new Date();
       const marketRow = await client.query<{ id: string }>(
         `INSERT INTO markets (event_id, provider_market_id, market_key, name, suspended, sort_order, last_updated_at)
-         VALUES ($1,$2,$3,$4, FALSE, $5, now())
+         VALUES ($1,$2,$3,$4, FALSE, $5, $6)
          ON CONFLICT (event_id, provider_market_id, market_key)
-         DO UPDATE SET name = EXCLUDED.name, suspended = FALSE, last_updated_at = now()
+         DO UPDATE SET name = EXCLUDED.name, suspended = FALSE,
+           last_updated_at = GREATEST(markets.last_updated_at, EXCLUDED.last_updated_at)
          RETURNING id`,
-        [eventId, m.providerMarketId, m.marketKey, m.name, i]
+        [eventId, m.providerMarketId, m.marketKey, m.name, i, quotedAt]
       );
       const marketId = marketRow.rows[0].id;
 
@@ -338,11 +377,12 @@ async function upsertOdds(
       for (const s of m.selections) {
         const selRow = await client.query<{ id: string; odd: string; prev_odd: string | null }>(
           `INSERT INTO selections (market_id, provider_selection_key, name, odd, last_updated_at)
-           VALUES ($1,$2,$3,$4, now())
+           VALUES ($1,$2,$3,$4, $5)
            ON CONFLICT (market_id, provider_selection_key)
-           DO UPDATE SET name = EXCLUDED.name, odd = EXCLUDED.odd, last_updated_at = now()
+           DO UPDATE SET name = EXCLUDED.name, odd = EXCLUDED.odd,
+             last_updated_at = GREATEST(selections.last_updated_at, EXCLUDED.last_updated_at)
            RETURNING id, odd, (SELECT odd FROM selections s2 WHERE s2.market_id = $1 AND s2.provider_selection_key = $2) AS prev_odd`,
-          [marketId, s.providerSelectionKey, s.name, s.odd]
+          [marketId, s.providerSelectionKey, s.name, s.odd, quotedAt]
         );
         const sel = selRow.rows[0];
         const before = prevMap.get(s.providerSelectionKey);

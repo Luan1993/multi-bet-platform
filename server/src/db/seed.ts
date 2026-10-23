@@ -51,6 +51,11 @@ async function main(): Promise<void> {
      ON CONFLICT (provider) DO UPDATE SET api_key = COALESCE(EXCLUDED.api_key, provider_configs.api_key)`,
     [config.odds.provider === "football-data", config.odds.footballDataKey || null]
   );
+  await query(
+    `INSERT INTO provider_configs (provider, enabled, api_key) VALUES ('the-odds-api', $1, $2)
+     ON CONFLICT (provider) DO UPDATE SET api_key = COALESCE(EXCLUDED.api_key, provider_configs.api_key)`,
+    [config.odds.provider === "the-odds-api", config.odds.theOddsApiKey || null]
+  );
 
   const credentials: string[] = [];
 

@@ -90,8 +90,13 @@ O servidor só aceita cupons com seleções **compatíveis**:
 
 ## Provedor de odds e odds manuais
 
-- `ODDS_PROVIDER=football-data` usa a API pública do football-data.org (`FOOTBALL_DATA_KEY`). O plano gratuito libera ~12 competições e **não inclui odds**: os jogos aparecem, mas sem mercados.
-- Para odds automáticas (1X2) basta ativar o **Odds Add-On** (€15/mês, 40 competições) no painel do football-data.org — o provedor já lê `odds.homeWin/draw/awayWin` sem alteração de código.
-- Alternativa sem custo: o proprietário define as odds em **Painel → Odds dos jogos** (`PUT /api/owner/events/:id/odds`). As odds manuais ficam no mercado `manual`, têm prioridade sobre o provedor e **não expiram** (o provedor ignora esses eventos para não sobrescrever).
-- Também é possível usar `ODDS_PROVIDER=api-football` com `API_FOOTBALL_KEY` (mais mercados: over/under, ambas marcam etc.).
+- **Produção atual:** `ODDS_PROVIDER=the-odds-api` com `THE_ODDS_API_KEY`. Puxa odds automáticas de futebol (Resultado Final + Total de Gols) direto da The Odds API (the-odds-api.com).
+  - O plano gratuito dá **500 créditos/mês**. Cada sincronização custa `mercados × regiões` por liga consultada; por isso o padrão é 3 ligas (Brasileirão, Libertadores e Premier League), 2 mercados e cache de 9h (`THE_ODDS_API_CACHE_MINUTES=540`). Isso consome ~480 créditos/mês.
+  - Ajuste as ligas com `THE_ODDS_API_SPORTS` (chaves como `soccer_brazil_campeonato`), os mercados com `THE_ODDS_API_MARKETS` (`h2h,totals`) e a região com `THE_ODDS_API_REGIONS` (`eu`).
+  - O cache é compartilhado e também controlado pelo banco (`events.last_synced_at`), então reinícios/cold starts do Render não consomem cota extra.
+  - Como as odds podem ter até 9h, defina `ODDS_STALE_MINUTES=600`: abaixo disso a confirmação de cupons é bloqueada por segurança.
+  - Para atualizações de hora em hora, o plano pago da The Odds API (20.000 créditos) é suficiente com a mesma configuração.
+- `ODDS_PROVIDER=football-data` usa a API pública do football-data.org (`FOOTBALL_DATA_KEY`). O plano gratuito libera ~12 competições e **não inclui odds**: os jogos aparecem, mas sem mercados. O Odds Add-On (€15/mês) libera **apenas 1X2**.
+- `ODDS_PROVIDER=api-football` com `API_FOOTBALL_KEY` (api-sports.io, plano pago) libera mais mercados: dupla chance, over/under, ambas marcam, empate anula e intervalo/final.
+- Alternativa manual: o proprietário define as odds em **Painel → Odds dos jogos** (`PUT /api/owner/events/:id/odds`). As odds manuais ficam no mercado `manual`, têm prioridade sobre o provedor e **não expiram** (o provedor ignora esses eventos para não sobrescrever).
 - Regra do produto: nunca inventar odds fora do modo demonstração. Sem provedor/pacote de odds e sem odds manuais, a página pública informa indisponibilidade e a confirmação de apostas fica bloqueada.

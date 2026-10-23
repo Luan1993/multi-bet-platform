@@ -32,6 +32,12 @@ export interface ProviderMarket {
   providerMarketId: string;
   marketKey: string;
   name: string;
+  /**
+   * Horário em que a odd foi cotada na origem (não o horário da gravação).
+   * Quando informado, é preservado no banco para que a validade da odd seja
+   * calculada com honestidade — mesmo que a sincronização use cache.
+   */
+  updatedAt?: Date;
   selections: Array<{ providerSelectionKey: string; name: string; odd: number }>;
 }
 

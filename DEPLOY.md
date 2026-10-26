@@ -16,7 +16,8 @@ As credenciais iniciais estão em `.runtime/render-credentials.txt` (arquivo loc
 ## Infraestrutura
 
 - **Web service:** Render, plano free, região Oregon (`srv-dbcfh66ktt5c73f9rs5g`)
-- **PostgreSQL:** Render, plano free, região Oregon (`dpg-dbcfdrifngtc73adfcs0-a`)
+- **PostgreSQL:** Neon, projeto `odd-haze-07423279`, branch `production` (região `sa-east-1`). A API usa a URL pooled (`DATABASE_URL`); migrações, seed e backup usam a URL direta (`DATABASE_URL_UNPOOLED`).
+- **PostgreSQL legado:** Render (`dpg-dbcfdrifngtc73adfcs0-a`), mantido como fallback até a expiração em 2026-11-20. Não é mais usado pela aplicação.
 - **Repositório:** https://github.com/Luan1993/multi-bet-platform
 - **Build:** `npm ci --include=dev && npm run build`
 - **Start:** `node scripts/deploy-start.cjs` (aguarda o banco, migra, roda o seed idempotente e sobe a API)
@@ -24,7 +25,7 @@ As credenciais iniciais estão em `.runtime/render-credentials.txt` (arquivo loc
 
 ## Banco de dados
 
-O PostgreSQL free do Render expira em **2026-11-20**. Para manter o banco gratuito por tempo indeterminado:
+A produção já foi migrada para o Neon em **2026-10-26** (backup restaurado e contagens/sequences conferidas). O PostgreSQL free do Render expira em **2026-11-20** e fica apenas como fallback. O procedimento abaixo documenta como a migração foi feita:
 
 1. Crie um projeto gratuito no [Neon](https://neon.com) (sem cartão).
 2. Copie a connection string (`postgresql://...?...sslmode=require`).

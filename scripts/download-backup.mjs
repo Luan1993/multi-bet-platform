@@ -66,3 +66,18 @@ const tables = [...text.matchAll(/-- Tabela (\S+): (\d+) registro/g)].map((m) =>
 console.log("Backup salvo:", file);
 console.log("Tamanho:", (buf.length / 1024).toFixed(1), "KB");
 console.log(tables.join("\n"));
+
+// Retenção: mantém as N cópias mais recentes para não encher o disco.
+const keep = Number(process.env.BACKUP_KEEP || 14);
+if (Number.isFinite(keep) && keep > 0) {
+  const old = fs
+    .readdirSync(outDir)
+    .filter((f) => /^multi-bet-backup-.*\.sql$/.test(f))
+    .map((f) => ({ f, t: fs.statSync(path.join(outDir, f)).mtimeMs }))
+    .sort((a, b) => b.t - a.t)
+    .slice(keep);
+  for (const { f } of old) {
+    fs.unlinkSync(path.join(outDir, f));
+    console.log("Backup antigo removido:", f);
+  }
+}

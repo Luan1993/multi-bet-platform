@@ -94,8 +94,12 @@ export default function OwnerResults() {
 
       const res = await api.put(`/api/owner/events/${id}/result`, payload);
       const s = res.settlement;
+      const others = Number(res.otherOwnersCouponsSettled ?? 0);
       setMessage(
-        `Resultado salvo. Cupons liquidados: ${s.won} ganhos / ${s.lost} perdidos / ${s.voided} anulados; ${s.pending} seguem pendentes.`
+        `Resultado salvo. Cupons liquidados: ${s.won} ganhos / ${s.lost} perdidos / ${s.voided} anulados; ${s.pending} seguem pendentes.` +
+          (others > 0
+            ? ` ${others} cupom(ns) de outros proprietários também foram processados.`
+            : "")
       );
       await load();
     } catch (err: any) {
@@ -118,7 +122,7 @@ export default function OwnerResults() {
           const kickoff = new Date(item.kickoffAt).toLocaleString("pt-BR");
           return (
             <Card key={item.id} title={`${item.home} x ${item.away}`}>
-              <div style={{ color: "var(--text-dim)", fontSize: "0.875rem", marginBottom: "0.75rem" }}>${item.competition ?? ""} • ${kickoff} • ${item.openCoupons} cupom(ns) aceito(s)</div>
+              <div style={{ color: "var(--text-dim)", fontSize: "0.875rem", marginBottom: "0.75rem" }}>{item.competition ?? ""} • {kickoff} • {item.openCoupons} cupom(ns) aceito(s)</div>
               {item.resultFinal ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: "0.5rem" }}>
                   <div style={{ fontWeight: 600 }}>
@@ -171,6 +175,7 @@ export default function OwnerResults() {
                   </div>
                   <div style={{ color: "var(--text-dim)", fontSize: "0.75rem" }}>
                     * Sem placar para "cartões/escanteios/chutes", as apostas nesses mercados ficam pendentes e precisam liquidação manual.
+                    {" "}O resultado é irreversível e afeta os cupons de todos os proprietários que usaram este evento.
                   </div>
                 </div>
               )}

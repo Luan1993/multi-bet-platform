@@ -29,10 +29,18 @@ O PostgreSQL free do Render expira em **2026-11-20**. Para manter o banco gratui
 1. Crie um projeto gratuito no [Neon](https://neon.com) (sem cartão).
 2. Copie a connection string (`postgresql://...?...sslmode=require`).
 3. **Antes de trocar**, baixe um backup: entre como admin e acesse `/api/admin/backup?confirm=1` (ou use **Configurações → Backup do banco**). Guarde o arquivo `.sql` fora do repositório.
-4. No Render, abra o serviço → **Environment** → edite `DATABASE_URL`.
-5. Rode um novo deploy. As migrações e o seed são idempotentes.
-6. Para restaurar: aplique as migrações (`npm run db:migrate`) e depois execute o `.sql` com `psql "$DATABASE_URL" -f backup.sql` (ou `node scripts/verify-backup.mjs` em um banco local).
-7. **Atenção:** o backup começa com `TRUNCATE ... RESTART IDENTITY CASCADE`; ele **substitui** os dados do banco de destino. Restaure primeiro em um banco de teste e confira as contagens.
+4. Restaure o backup no Neon (o banco precisa existir e estar vazio):
+
+   ```bash
+   npm run build -w server
+   TARGET_DATABASE_URL="postgresql://...?...sslmode=require" \
+     node scripts/migrate-db.mjs backups/multi-bet-backup-....sql --confirm
+   ```
+
+   O script aplica as migrações, restaura o `.sql`, compara as contagens e confere as sequences. Se qualquer contagem divergir, ele para e **não** altera produção.
+5. No Render, abra o serviço → **Environment** → edite `DATABASE_URL` com a URL do Neon e rode um novo deploy.
+6. Confira login admin, dashboard, cupons, resultados e o endpoint de backup. Só depois apague o PostgreSQL antigo do Render.
+7. **Atenção:** o backup começa com `TRUNCATE ... RESTART IDENTITY CASCADE`; ele **substitui** os dados do banco de destino. Restaure primeiro em um banco de teste (`node scripts/verify-backup.mjs`) e confira as contagens.
 
 > O PostgreSQL free do Render **não expõe conexão externa**: o backup precisa ser gerado pelo próprio serviço (rota acima) ou por um script rodando dentro do Render. O endpoint inclui dados pessoais e hashes de senha — trate o arquivo como confidencial.
 
@@ -55,7 +63,17 @@ node scripts/verify-backup.mjs backups/multi-bet-backup-....sql bet_restore_chec
 
 O verificador recria um banco local, aplica as migrações, restaura o `.sql`, compara as contagens de todas as tabelas e confere as sequences. O backup é ordenado pelas foreign keys (pais antes dos filhos) e inclui as sequences.
 
-**Backup externo:** para guardar fora do Render, use um agendador (GitHub Actions, cron em outra máquina ou serviço de cron) que faça login admin e chame `GET /api/admin/backup?confirm=1`, mantendo pelo menos 7 cópias. O arquivo contém dados pessoais: armazene criptografado e com acesso restrito.
+**Backup externo:** para guardar fora do Render, use um agendador (GitHub Actions, cron em outra máquina ou serviço de cron) que faça login admin e chame `GET /api/admin/backup?confirm=1`, mantendo pelo menos 14 cópias. O arquivo contém dados pessoais: armazene criptografado e com acesso restrito. O `scripts/download-backup.mjs` já remove automaticamente as cópias mais antigas (padrão: 14; ajuste com `BACKUP_KEEP`).
+
+**Agendamento no Windows (esta máquina):** a tarefa `MultiBet-Backup-Diario` roda todo dia às 03:00 e grava o log em `.runtime/backup-task.log`. Para recriar em outra máquina:
+
+```powershell
+# crie .runtime/backup-daily.cmd apontando para o node e para o repositório
+schtasks /Create /F /SC DAILY /ST 03:00 /TN "MultiBet-Backup-Diario" `
+  /TR "C:\caminho\para\o\repo\.runtime\backup-daily.cmd"
+```
+
+A tarefa é “interativo apenas”: só roda com o usuário logado. Se precisar que rode sem sessão aberta, configure a tarefa com credenciais no Agendador de Tarefas do Windows ou use um cron em servidor/VPS. Teste com `schtasks /Run /TN "MultiBet-Backup-Diario"` e confira o log.
 
 ## Atualizações
 

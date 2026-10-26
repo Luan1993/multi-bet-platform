@@ -9,6 +9,7 @@ import { generateInitialPassword, hashPassword, validatePasswordPolicy } from ".
 import { revokeAllUserSessions } from "../../lib/session";
 import { getProviderMeta, invalidateProviderCache, resolveProvider, providerState } from "../odds/service";
 import { config } from "../../config";
+import { buildSqlBackup } from "../../lib/backup";
 
 export const adminRoutes = Router();
 adminRoutes.use(requireAdmin);
@@ -987,6 +988,30 @@ adminRoutes.get("/reports/consolidated", async (req, res, next) => {
         lastCouponAt: r.last_coupon_at ? new Date(r.last_coupon_at).toISOString() : null,
       })),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Backup lógico do banco (somente admin). Use antes de migrações de infra.
+// ---------------------------------------------------------------------------
+adminRoutes.get("/backup", async (req, res, next) => {
+  try {
+    if (req.query.confirm !== "1") {
+      throw badRequest("confirm_required", "Confirme o download com ?confirm=1.");
+    }
+    const backup = await buildSqlBackup();
+    await audit({
+      ...auditCtx(req),
+      action: "backup.download",
+      entity: "database",
+      after: { filename: backup.filename, tables: backup.tables },
+    });
+    res.setHeader("Content-Type", "application/sql; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="${backup.filename}"`);
+    res.setHeader("Cache-Control", "no-store");
+    res.send(backup.content);
   } catch (err) {
     next(err);
   }

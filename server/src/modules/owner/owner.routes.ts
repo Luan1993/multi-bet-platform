@@ -1497,6 +1497,7 @@ async function settleCouponsForFixture(
     code: string;
     stake_cents: string;
     limit_applied_cents: string;
+    is_demo: boolean;
     odds_snapshot: {
       selections?: Array<{
         odd?: number;
@@ -1506,7 +1507,7 @@ async function settleCouponsForFixture(
       }>;
     };
   }>(
-    `SELECT id, code, stake_cents, limit_applied_cents, odds_snapshot
+    `SELECT id, code, stake_cents, limit_applied_cents, is_demo, odds_snapshot
        FROM coupons
       WHERE owner_id = $1 AND status = 'accepted'
         AND EXISTS (
@@ -1605,7 +1606,7 @@ async function settleCouponsForFixture(
       await client.query(
         `INSERT INTO financial_movements (owner_id, coupon_id, type, amount_cents, is_demo, note, created_by)
          VALUES ($2,$1,'prize_due',$3,$4,$5,$6)`,
-        [coupon.id, ownerId, due, coupon.odds_snapshot ? true : true, "prêmio devido apurado automaticamente", actor.id]
+        [coupon.id, ownerId, due, coupon.is_demo, "prêmio devido apurado automaticamente", actor.id]
       );
       summary.won++;
     } else if (evaluation.status === "lost") {

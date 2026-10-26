@@ -65,7 +65,7 @@ export default function OwnerCoupons() {
     }
   }
 
-  async function act(action: "accept" | "cancel" | "settle", payload?: any) {
+  async function act(action: "accept" | "cancel" | "settle" | "pay", payload?: any) {
     if (!selected) return;
     setBusy(true);
     setError(null);
@@ -77,6 +77,8 @@ export default function OwnerCoupons() {
           ? "Cupom aceito com odds revalidadas."
           : action === "cancel"
           ? "Cupom cancelado."
+          : action === "pay"
+          ? "Pagamento de prêmio registrado."
           : "Cupom liquidado."
       );
       await openCoupon(selected.coupon.code);
@@ -192,6 +194,7 @@ export default function OwnerCoupons() {
           onAccept={() => act("accept")}
           onCancel={(reason) => act("cancel", { reason })}
           onSettle={(payload) => act("settle", payload)}
+          onPay={(amountCents) => act("pay", amountCents ? { amountCents } : {})}
         />
       )}
     </div>
@@ -205,6 +208,7 @@ function CouponModal({
   onAccept,
   onCancel,
   onSettle,
+  onPay,
 }: {
   data: any;
   busy: boolean;
@@ -212,11 +216,18 @@ function CouponModal({
   onAccept: () => void;
   onCancel: (reason: string) => void;
   onSettle: (payload: { result: "won" | "lost"; note?: string }) => void;
+  onPay: (amountCents?: number) => void;
 }) {
   const c = data.coupon;
-  const [mode, setMode] = useState<"view" | "cancel" | "settle">("view");
+  const [mode, setMode] = useState<"view" | "cancel" | "settle" | "pay">("view");
   const [reason, setReason] = useState("");
   const [note, setNote] = useState("");
+  const remaining = Math.max(0, Number(c.duePayoutCents ?? 0) - Number(c.paidPayoutCents ?? 0));
+  const [payAmount, setPayAmount] = useState("");
+
+  useEffect(() => {
+    setPayAmount(remaining > 0 ? (remaining / 100).toFixed(2) : "");
+  }, [remaining]);
 
   return (
     <Modal title={`Cupom ${c.code}`} onClose={onClose}>
@@ -236,6 +247,12 @@ function CouponModal({
         <Info label="Cliente" value={c.client ? `${c.client.name} (${c.client.code})` : "—"} />
         {(c.client?.phone || c.clientPhone) && (
           <Info label="WhatsApp" value={c.client?.phone || c.clientPhone || ""} />
+        )}
+        {c.duePayoutCents !== null && c.duePayoutCents !== undefined && (
+          <Info label="Prêmio devido" value={brl(Number(c.duePayoutCents))} />
+        )}
+        {c.paidPayoutCents !== null && c.paidPayoutCents !== undefined && (
+          <Info label="Prêmio pago" value={brl(Number(c.paidPayoutCents))} />
         )}
       </div>
 
@@ -290,6 +307,37 @@ function CouponModal({
         </div>
       )}
 
+      {mode === "pay" && (
+        <div style={{ marginBottom: "1rem" }}>
+          <Alert kind="info">
+            Prêmio devido: <strong>{brl(Number(c.duePayoutCents ?? 0))}</strong> • Já pago: <strong>{brl(Number(c.paidPayoutCents ?? 0))}</strong> • Falta: <strong>{brl(remaining)}</strong>
+          </Alert>
+          <Field label="Valor a pagar (R$)">
+            <Input
+              type="number"
+              min={0.01}
+              step="0.01"
+              value={payAmount}
+              onChange={(e) => setPayAmount(e.target.value)}
+            />
+          </Field>
+          <div style={{ display: "flex", gap: "0.5rem" }}>
+            <Button
+              variant="success"
+              disabled={busy || !(Number(payAmount.replace(",", ".")) > 0)}
+              onClick={() => {
+                const value = Number(payAmount.replace(",", "."));
+                if (!Number.isFinite(value) || value <= 0) return;
+                onPay(Math.round(value * 100));
+              }}
+            >
+              {busy ? "Registrando..." : "Registrar pagamento"}
+            </Button>
+            <Button variant="ghost" onClick={() => setMode("view")}>Voltar</Button>
+          </div>
+        </div>
+      )}
+
       {mode === "view" && (
         <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", marginTop: "0.5rem" }}>
           {c.status === "pending" && (
@@ -301,6 +349,14 @@ function CouponModal({
             <Button variant="success" disabled={busy} onClick={() => setMode("settle")}>
               Liquidar
             </Button>
+          )}
+          {c.status === "won" && remaining > 0 && (
+            <Button variant="success" disabled={busy} onClick={() => setMode("pay")}>
+              Registrar pagamento
+            </Button>
+          )}
+          {c.status === "won" && remaining <= 0 && (
+            <Badge status="won" />
           )}
           {["pending", "accepted"].includes(c.status) && (
             <Button variant="danger" onClick={() => setMode("cancel")}>

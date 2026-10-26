@@ -203,6 +203,16 @@ export default function AdminSettings() {
           </div>
         </div>
       </form>
+
+      <Card title="Backup do banco" style={{ marginTop: "1.5rem" }}>
+        <p style={{ color: "var(--text-dim)", marginTop: 0 }}>
+          Baixe uma cópia lógica completa (SQL) antes de migrações ou mudanças de infraestrutura.
+          O arquivo contém dados pessoais e hashes de senha: guarde em local seguro.
+        </p>
+        <a href="/api/admin/backup?confirm=1" download>
+          <Button variant="ghost">Baixar backup SQL</Button>
+        </a>
+      </Card>
     </div>
   );
 }

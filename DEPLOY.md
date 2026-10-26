@@ -28,10 +28,16 @@ O PostgreSQL free do Render expira em **2026-11-20**. Para manter o banco gratui
 
 1. Crie um projeto gratuito no [Neon](https://neon.com) (sem cartão).
 2. Copie a connection string (`postgresql://...?...sslmode=require`).
-3. No Render, abra o serviço → **Environment** → edite `DATABASE_URL`.
-4. Rode um novo deploy. As migrações e o seed são idempotentes.
+3. **Antes de trocar**, baixe um backup: entre como admin e acesse `/api/admin/backup?confirm=1` (ou use **Configurações → Backup do banco**). Guarde o arquivo `.sql` fora do repositório.
+4. No Render, abra o serviço → **Environment** → edite `DATABASE_URL`.
+5. Rode um novo deploy. As migrações e o seed são idempotentes.
+6. Para restaurar em um banco vazio: aplique as migrações (`npm run db:migrate`) e depois execute o `.sql` com `psql "$DATABASE_URL" -f backup.sql`.
+
+> O PostgreSQL free do Render **não expõe conexão externa**: o backup precisa ser gerado pelo próprio serviço (rota acima) ou por um script rodando dentro do Render. O endpoint inclui dados pessoais e hashes de senha — trate o arquivo como confidencial.
 
 Alternativa: use Supabase ou Aiven no plano free.
+
+**Backup automático:** agende `GET /api/admin/backup?confirm=1` (com cookie de admin) em um serviço externo, ou rode `npm run backup` em uma máquina com acesso ao banco. O Render free não tem disco persistente; baixe e armazene fora dele.
 
 ## Atualizações
 
@@ -87,6 +93,25 @@ O servidor só aceita cupons com seleções **compatíveis**:
 - Troque as senhas iniciais após o primeiro acesso.
 - O token clássico do GitHub usado apenas para criar/enviar o repositório deve ser **revogado** em https://github.com/settings/tokens depois do deploy.
 - O arquivo `.runtime/` (credenciais, tokens e banco local) é ignorado pelo Git.
+
+## Resultados e liquidação automática
+
+- No painel do proprietário, **Resultados** lista os jogos das últimas 72h. Informe placar, cartões, escanteios e chutes a gol (estatísticas opcionais) e clique em **Salvar e liquidar cupons**.
+- O servidor apura `match_winner`, `goals_over_under`, `cards_over_under`, `corners_over_under` e `shots_on_goal_over_under` usando o snapshot do cupom (não depende das seleções atuais).
+- Linha inteira empatada (ex.: 10 escanteios na linha 10) anula a seleção (push). Evento anulado anula todas as seleções.
+- Qualquer seleção perdida derruba o cupom. Todas anuladas → cupom cancelado e stake estornada via ajuste negativo no caixa. Vencedor → prêmio devido calculado pela odd combinada restante, limitado ao teto do cupom.
+- Mercados não suportados (ex.: dupla chance) ficam pendentes e impedem a liquidação automática; o cupom pode ser liquidado manualmente.
+- O prêmio devido **não é marcado como pago** automaticamente. Use **Cupons → Registrar pagamento** para lançar o `prize_paid` no caixa (total ou parcial).
+
+## Exposição / risco
+
+- **Painel → Exposição / Risco** mostra cupons aceitos em aberto, stake, responsabilidade potencial (se todos ganharem), prêmios ganhos ainda não pagos e a exposição por evento/mercado.
+- A exposição por evento soma o retorno potencial dos cupons que incluem aquele evento; serve para dimensionar o pior cenário por jogo, não como rateio contábil.
+
+## CI e qualidade
+
+- `npm run ci` executa typecheck do servidor, testes e build completo (é o mesmo comando usado no GitHub Actions).
+- O workflow está em `.github/workflows/ci.yml`, mas o token atual do GitHub não tem permissão `workflow` para enviá-lo. Gere um token com escopo `workflow` (ou adicione o arquivo pela interface do GitHub) para ativar o pipeline.
 
 ## Provedor de odds e odds manuais
 

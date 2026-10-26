@@ -12,12 +12,14 @@ const { spawnSync } = require("child_process");
 const { Client } = require("pg");
 
 const ROOT = path.resolve(__dirname, "..");
-const DB_URL = process.env.DATABASE_URL || "";
+// Neon: conexão direta para o bootstrap/migrações; a API usa DATABASE_URL
+// (pooled) depois que o schema está pronto.
+const DB_URL = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL || "";
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 async function waitForDatabase() {
   if (!DB_URL) {
-    throw new Error("DATABASE_URL não configurada.");
+    throw new Error("DATABASE_URL_UNPOOLED ou DATABASE_URL não configurada.");
   }
 
   const deadline = Date.now() + 90_000;

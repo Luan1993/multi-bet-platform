@@ -5,10 +5,10 @@
 import fs from "fs";
 import path from "path";
 import crypto from "crypto";
-import { getPool } from "./pool";
+import { getMigrationPool } from "./pool";
 
 export async function migrate(verbose = true): Promise<void> {
-  const pool = getPool();
+  const pool = getMigrationPool();
   await pool.query(`
     CREATE TABLE IF NOT EXISTS schema_migrations (
       name        TEXT PRIMARY KEY,

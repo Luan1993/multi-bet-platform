@@ -18,7 +18,7 @@ fs.mkdirSync(outDir, { recursive: true });
 const stamp = new Date().toISOString().replace(/[:.]/g, "-");
 const file = path.join(outDir, `backup-${stamp}.sql`);
 
-const url = process.env.DATABASE_URL;
+const url = process.env.DATABASE_URL_UNPOOLED || process.env.DATABASE_URL;
 if (!url) {
   console.error("DATABASE_URL não definida.");
   process.exit(1);

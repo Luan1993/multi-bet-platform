@@ -25,6 +25,16 @@ function int(v: string | undefined, def: number): number {
 
 const isTest = process.env.NODE_ENV === "test";
 
+const databaseUrl = process.env.DATABASE_URL || "";
+const testDatabaseUrl = process.env.TEST_DATABASE_URL;
+// Neon fornece duas URLs: pooled (aplicação) e direta (migrações/seed/backup).
+// Em bancos locais as duas são a mesma, mesmo que um DATABASE_URL_UNPOOLED
+// antigo tenha ficado no .env.
+const localDatabase = /(^|@)(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/i.test(databaseUrl);
+const directDatabaseUrl = localDatabase
+  ? databaseUrl
+  : process.env.DATABASE_URL_UNPOOLED || databaseUrl;
+
 // URL pública: prioriza PUBLIC_BASE_URL; em Render, usa RENDER_EXTERNAL_URL.
 // Remove barras finais para não gerar links com "//".
 const publicBaseUrl = (
@@ -42,9 +52,10 @@ export const config = {
 
   db: {
     // Em testes usa-se um banco dedicado, apontado por TEST_DATABASE_URL.
-    url: isTest
-      ? process.env.TEST_DATABASE_URL || process.env.DATABASE_URL || ""
-      : process.env.DATABASE_URL || "",
+    // `url` é o tráfego normal da API; `directUrl` é usado por migrações,
+    // seed e ferramentas administrativas. Nunca use a URL pooled para DDL.
+    url: isTest ? testDatabaseUrl || databaseUrl : databaseUrl,
+    directUrl: isTest ? testDatabaseUrl || databaseUrl : directDatabaseUrl,
     localDir: process.env.PG_LOCAL_DIR || ".pgdata",
     localPort: int(process.env.PG_LOCAL_PORT, 55432),
   },

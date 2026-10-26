@@ -2,6 +2,17 @@ import { Pool, PoolClient, QueryResultRow } from "pg";
 import { config } from "../config";
 
 let pool: Pool | null = null;
+let migrationPool: Pool | null = null;
+
+function createPool(connectionString: string): Pool {
+  return new Pool({
+    connectionString,
+    max: 10,
+    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: 10_000,
+    // Sessões curtas de API: statements parametrizados sempre.
+  });
+}
 
 export function getPool(): Pool {
   if (!pool) {
@@ -11,15 +22,25 @@ export function getPool(): Pool {
           "ou configure DATABASE_URL no .env apontando para um servidor PostgreSQL (ex.: Neon/Supabase free tier)."
       );
     }
-    pool = new Pool({
-      connectionString: config.db.url,
-      max: 10,
-      idleTimeoutMillis: 30_000,
-      connectionTimeoutMillis: 10_000,
-      // Sessões curtas de API: statements parametrizados sempre.
-    });
+    pool = createPool(config.db.url);
   }
   return pool;
+}
+
+/**
+ * Pool direto (sem pooling do provedor), usado apenas para DDL/migrações.
+ * No Neon a URL pooled não deve ser usada para operações de schema.
+ */
+export function getMigrationPool(): Pool {
+  if (!migrationPool) {
+    if (!config.db.directUrl) {
+      throw new Error(
+        "DATABASE_URL_UNPOOLED (ou DATABASE_URL) não configurada para migrações."
+      );
+    }
+    migrationPool = createPool(config.db.directUrl);
+  }
+  return migrationPool;
 }
 
 /** Executa uma query parametrizada no pool. */
@@ -65,8 +86,8 @@ export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>)
 }
 
 export async function closePool(): Promise<void> {
-  if (pool) {
-    await pool.end();
-    pool = null;
-  }
+  const pools = [pool, migrationPool].filter((p): p is Pool => p !== null);
+  pool = null;
+  migrationPool = null;
+  await Promise.all(pools.map((p) => p.end()));
 }

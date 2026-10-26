@@ -29,16 +29,15 @@ O PostgreSQL free do Render expira em **2026-11-20**. Para manter o banco gratui
 1. Crie um projeto gratuito no [Neon](https://neon.com) (sem cartão).
 2. Copie a connection string (`postgresql://...?...sslmode=require`).
 3. **Antes de trocar**, baixe um backup: entre como admin e acesse `/api/admin/backup?confirm=1` (ou use **Configurações → Backup do banco**). Guarde o arquivo `.sql` fora do repositório.
-4. Restaure o backup no Neon (o banco precisa existir e estar vazio):
+4. Restaure o backup no Neon (o banco precisa existir e estar vazio). Use a URL **direta** do Neon, sem `-pooler`, em `DATABASE_URL_UNPOOLED`:
 
    ```bash
    npm run build -w server
-   TARGET_DATABASE_URL="postgresql://...?...sslmode=require" \
-     node scripts/migrate-db.mjs backups/multi-bet-backup-....sql --confirm
+   node -r dotenv/config scripts/migrate-db.mjs backups/multi-bet-backup-....sql --confirm
    ```
 
    O script aplica as migrações, restaura o `.sql`, compara as contagens e confere as sequences. Se qualquer contagem divergir, ele para e **não** altera produção.
-5. No Render, abra o serviço → **Environment** → edite `DATABASE_URL` com a URL do Neon e rode um novo deploy.
+5. No Render, abra o serviço → **Environment** → edite `DATABASE_URL` com a URL **pooled** do Neon e adicione `DATABASE_URL_UNPOOLED` com a URL **direta**. Rode um novo deploy.
 6. Confira login admin, dashboard, cupons, resultados e o endpoint de backup. Só depois apague o PostgreSQL antigo do Render.
 7. **Atenção:** o backup começa com `TRUNCATE ... RESTART IDENTITY CASCADE`; ele **substitui** os dados do banco de destino. Restaure primeiro em um banco de teste (`node scripts/verify-backup.mjs`) e confira as contagens.
 

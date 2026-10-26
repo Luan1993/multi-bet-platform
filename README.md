@@ -33,7 +33,8 @@ Edite o `.env`:
 
 | Variável | Descrição |
 | --- | --- |
-| `DATABASE_URL` | URL do PostgreSQL. Vazio usa o banco portátil local. |
+| `DATABASE_URL` | URL do PostgreSQL. Vazio usa o banco portátil local. No Neon, use a URL **pooled**. |
+| `DATABASE_URL_UNPOOLED` | URL **direta** do Neon para migrações/seed/backup (opcional em outros bancos). |
 | `PG_LOCAL_DIR` | Pasta do PostgreSQL portátil (padrão `.pgdata`). |
 | `ODDS_PROVIDER` | `demo`, `api-football` ou `none`. |
 | `API_FOOTBALL_KEY` | Chave da API-Football (somente para o provedor real). |

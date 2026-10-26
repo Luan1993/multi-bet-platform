@@ -28,5 +28,9 @@
     "esbuild@0.28.2": true,
     "esbuild@0.21.5": true,
     "@embedded-postgres/windows-x64@17.4.0-beta.15": true
+  },
+  "dependencies": {
+    "@neon/config": "^1.9.4",
+    "@neon/env": "^1.6.5"
   }
 }

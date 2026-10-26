@@ -26,7 +26,11 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const backupFile = process.argv[2]
   ? path.resolve(process.argv[2])
   : null;
-const targetUrl = process.argv[3] || process.env.TARGET_DATABASE_URL;
+const targetArg = process.argv.slice(3).find((arg) => !arg.startsWith("--"));
+const targetUrl =
+  targetArg ||
+  process.env.TARGET_DATABASE_URL ||
+  process.env.DATABASE_URL_UNPOOLED;
 const confirmed = process.argv.includes("--confirm");
 
 if (!backupFile || !fs.existsSync(backupFile)) {
@@ -65,6 +69,7 @@ console.log(`[migrate-db] destino: ${masked(targetUrl)}`);
 const env = {
   ...process.env,
   DATABASE_URL: targetUrl,
+  DATABASE_URL_UNPOOLED: targetUrl,
   NODE_ENV: "development",
 };
 const migrated = spawnSync(process.execPath, [path.join(ROOT, "server", "dist", "db", "migrate.js")], {

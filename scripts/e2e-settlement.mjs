@@ -47,6 +47,7 @@ for (const [name, url] of [["E2E_PG_ADMIN_URL", PG_ADMIN_URL], ["DATABASE_URL de
 const childEnv = {
   ...process.env,
   DATABASE_URL: DB_URL,
+  DATABASE_URL_UNPOOLED: DB_URL,
   NODE_ENV: "development",
   PORT: String(PORT),
   PUBLIC_BASE_URL: BASE,

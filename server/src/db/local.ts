@@ -91,13 +91,18 @@ function updateEnvDatabaseUrl(): void {
   const envPath = path.join(config.repoRoot, ".env");
   const url = `postgresql://${user}@127.0.0.1:${port}/bet`;
   if (fs.existsSync(envPath)) {
-    const content = fs.readFileSync(envPath, "utf8");
-    if (/^DATABASE_URL=.*$/m.test(content)) {
-      fs.writeFileSync(envPath, content.replace(/^DATABASE_URL=.*$/m, `DATABASE_URL=${url}`));
-    } else {
-      fs.appendFileSync(envPath, `\nDATABASE_URL=${url}\n`);
+    let content = fs.readFileSync(envPath, "utf8");
+    for (const key of ["DATABASE_URL", "DATABASE_URL_UNPOOLED"]) {
+      const line = new RegExp(`^${key}=.*$`, "m");
+      const value = `${key}=${url}`;
+      if (line.test(content)) {
+        content = content.replace(line, value);
+      } else {
+        content += `\n${value}`;
+      }
     }
-    console.log(`[pg] .env atualizado: DATABASE_URL=${url}`);
+    fs.writeFileSync(envPath, content);
+    console.log(`[pg] .env atualizado: DATABASE_URL e DATABASE_URL_UNPOOLED=${url}`);
   } else {
     console.log(`[pg] Configure no seu .env: DATABASE_URL=${url}`);
   }

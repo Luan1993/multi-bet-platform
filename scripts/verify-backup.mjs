@@ -60,7 +60,12 @@ await admin.query(`DROP DATABASE IF EXISTS "${dbName}" WITH (FORCE)`);
 await admin.query(`CREATE DATABASE "${dbName}"`);
 await admin.end();
 
-const env = { ...process.env, DATABASE_URL: targetUrl, NODE_ENV: "development" };
+const env = {
+  ...process.env,
+  DATABASE_URL: targetUrl,
+  DATABASE_URL_UNPOOLED: targetUrl,
+  NODE_ENV: "development",
+};
 const migrated = spawnSync(process.execPath, [path.join(ROOT, "server", "dist", "db", "migrate.js")], {
   cwd: ROOT,
   env,

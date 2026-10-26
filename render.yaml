@@ -39,3 +39,7 @@ services:
       # Formato: postgresql://user:senha@host:5432/banco?sslmode=require
       - key: DATABASE_URL
         sync: false
+      # Conexão direta do Neon para migrações/seed (a pooled fica em
+      # DATABASE_URL). Em bancos sem URL direta, a API usa DATABASE_URL.
+      - key: DATABASE_URL_UNPOOLED
+        sync: false

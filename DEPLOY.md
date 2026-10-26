@@ -31,13 +31,31 @@ O PostgreSQL free do Render expira em **2026-11-20**. Para manter o banco gratui
 3. **Antes de trocar**, baixe um backup: entre como admin e acesse `/api/admin/backup?confirm=1` (ou use **Configurações → Backup do banco**). Guarde o arquivo `.sql` fora do repositório.
 4. No Render, abra o serviço → **Environment** → edite `DATABASE_URL`.
 5. Rode um novo deploy. As migrações e o seed são idempotentes.
-6. Para restaurar em um banco vazio: aplique as migrações (`npm run db:migrate`) e depois execute o `.sql` com `psql "$DATABASE_URL" -f backup.sql`.
+6. Para restaurar: aplique as migrações (`npm run db:migrate`) e depois execute o `.sql` com `psql "$DATABASE_URL" -f backup.sql` (ou `node scripts/verify-backup.mjs` em um banco local).
+7. **Atenção:** o backup começa com `TRUNCATE ... RESTART IDENTITY CASCADE`; ele **substitui** os dados do banco de destino. Restaure primeiro em um banco de teste e confira as contagens.
 
 > O PostgreSQL free do Render **não expõe conexão externa**: o backup precisa ser gerado pelo próprio serviço (rota acima) ou por um script rodando dentro do Render. O endpoint inclui dados pessoais e hashes de senha — trate o arquivo como confidencial.
 
 Alternativa: use Supabase ou Aiven no plano free.
 
 **Backup automático:** agende `GET /api/admin/backup?confirm=1` (com cookie de admin) em um serviço externo, ou rode `npm run backup` em uma máquina com acesso ao banco. O Render free não tem disco persistente; baixe e armazene fora dele.
+
+**Gerar e baixar de produção:**
+
+```bash
+node scripts/download-backup.mjs   # usa .runtime/prod.env e grava em backups/
+```
+
+**Conferir se o backup restaura** (PostgreSQL local já iniciado com `npm run db:local -w server`):
+
+```bash
+npm run build -w server
+node scripts/verify-backup.mjs backups/multi-bet-backup-....sql bet_restore_check
+```
+
+O verificador recria um banco local, aplica as migrações, restaura o `.sql`, compara as contagens de todas as tabelas e confere as sequences. O backup é ordenado pelas foreign keys (pais antes dos filhos) e inclui as sequences.
+
+**Backup externo:** para guardar fora do Render, use um agendador (GitHub Actions, cron em outra máquina ou serviço de cron) que faça login admin e chame `GET /api/admin/backup?confirm=1`, mantendo pelo menos 7 cópias. O arquivo contém dados pessoais: armazene criptografado e com acesso restrito.
 
 ## Atualizações
 
@@ -91,6 +109,7 @@ O servidor só aceita cupons com seleções **compatíveis**:
 - Em produção o modo demonstração está **desligado** (`demo_mode = false`): cupons e lançamentos novos são gravados com `is_demo = false`. Cupons antigos mantêm a marcação histórica.
 - A plataforma **não** movimenta depósitos/saques: não há gateway de pagamento homologado; entradas e prêmios são registrados manualmente pelo painel (Caixa).
 - Troque as senhas iniciais após o primeiro acesso.
+- **Resultado de evento é uma operação global:** qualquer proprietário autenticado pode encerrar um evento compartilhado, e isso liquida cupons de todos. Em operação com sócios/terceiros, dê login de proprietário apenas a quem pode informar resultados ou evolua para um perfil separado de “operador de resultados”.
 - O token clássico do GitHub usado apenas para criar/enviar o repositório deve ser **revogado** em https://github.com/settings/tokens depois do deploy.
 - O arquivo `.runtime/` (credenciais, tokens e banco local) é ignorado pelo Git.
 
@@ -102,6 +121,19 @@ O servidor só aceita cupons com seleções **compatíveis**:
 - Qualquer seleção perdida derruba o cupom. Todas anuladas → cupom cancelado e stake estornada via ajuste negativo no caixa. Vencedor → prêmio devido calculado pela odd combinada restante, limitado ao teto do cupom.
 - Mercados não suportados (ex.: dupla chance) ficam pendentes e impedem a liquidação automática; o cupom pode ser liquidado manualmente.
 - O prêmio devido **não é marcado como pago** automaticamente. Use **Cupons → Registrar pagamento** para lançar o `prize_paid` no caixa (total ou parcial).
+- **Eventos e resultados são globais:** ao salvar o resultado, o servidor liquida os cupons aceitos de **todos** os proprietários que usaram aquele evento (as movimentações financeiras ficam no caixa de cada um). A resposta mostra apenas os cupons do proprietário que informou; o log de auditoria guarda o resumo completo.
+- O resultado é **irreversível** (`result_final`): confira placar e estatísticas antes de salvar. Um evento sem estatísticas de cartões/escanteios/chutes deixa esses mercados pendentes; liquide manualmente se necessário.
+- Em operação multi-tenant, o resultado afeta todos os proprietários. Informe resultados apenas por pessoas de confiança (ver “Segurança”).
+
+## Teste de ponta a ponta da liquidação
+
+Com o PostgreSQL local iniciado (`npm run db:local -w server`):
+
+```bash
+npm run e2e:settlement
+```
+
+O teste recria o banco `bet_e2e`, sobe a API em uma porta separada e valida cupom ganho, perdido, push (anulado), mercado não suportado (pendente), liquidação de cupom de outro proprietário, prêmio devido/pago, saldo, resultado e exposição. Ele **nunca** aponta para produção (aborta se o host não for local).
 
 ## Exposição / risco
 
@@ -110,8 +142,9 @@ O servidor só aceita cupons com seleções **compatíveis**:
 
 ## CI e qualidade
 
-- `npm run ci` executa typecheck do servidor, testes e build completo (é o mesmo comando usado no GitHub Actions).
-- O workflow está em `.github/workflows/ci.yml`, mas o token atual do GitHub não tem permissão `workflow` para enviá-lo. Gere um token com escopo `workflow` (ou adicione o arquivo pela interface do GitHub) para ativar o pipeline.
+- `npm run ci` executa typecheck do servidor, testes e build completo.
+- O workflow de exemplo está em `docs/ci-workflow.yml`. O token atual do GitHub não tem permissão `workflow` para enviar `.github/workflows/`, então copie o arquivo para lá com um token que tenha o escopo `workflow` (ou use a interface do GitHub) para ativar o pipeline.
+- `npm run e2e:settlement` e `node scripts/verify-backup.mjs` exigem o PostgreSQL local e não rodam no CI por padrão.
 
 ## Provedor de odds e odds manuais
 

@@ -16,7 +16,10 @@
     "ci": "npm run -w server typecheck && npm run -w server test && npm run build",
     "db:migrate": "npm run db:migrate -w server",
     "db:seed": "npm run db:seed -w server",
-    "backup": "node scripts/backup-db.mjs"
+    "backup": "node scripts/backup-db.mjs",
+    "backup:prod": "node scripts/download-backup.mjs",
+    "e2e:settlement": "npm run build -w server && node scripts/e2e-settlement.mjs",
+    "verify:backup": "node scripts/verify-backup.mjs"
   },
   "engines": {
     "node": ">=20"

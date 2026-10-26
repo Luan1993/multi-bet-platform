@@ -738,7 +738,9 @@ async function computeOwnerCash(ownerId: number) {
     [ownerId]
   );
   const pending = await queryOne<{ due: string }>(
-    `SELECT COALESCE(SUM(due_payout_cents), 0)::bigint AS due FROM coupons WHERE owner_id = $1 AND status = 'accepted'`,
+    // Cupons aceitos ainda não têm prêmio devido; a responsabilidade em aberto
+    // é o retorno potencial contratado no momento da aceitação.
+    `SELECT COALESCE(SUM(potential_payout_cents), 0)::bigint AS due FROM coupons WHERE owner_id = $1 AND status = 'accepted'`,
     [ownerId]
   );
 
@@ -1482,12 +1484,17 @@ interface SettlementSummary {
   lost: number;
   voided: number;
   pending: number;
-  coupons: Array<{ code: string; status: string; duePayoutCents: number }>;
+  coupons: Array<{ code: string; status: string; duePayoutCents: number; ownerId: number }>;
 }
 
+/**
+ * Liquida os cupons aceitos de TODOS os proprietários que contenham o evento.
+ * Eventos e mercados são globais na plataforma; o resultado é único. Limitar a
+ * liquidação ao proprietário que informou o resultado deixaria cupons de outros
+ * proprietários presos para sempre (o evento já não aceita novo resultado).
+ */
 async function settleCouponsForFixture(
   client: { query: import("pg").PoolClient["query"] },
-  ownerId: number,
   fixtureId: string,
   actor: { id: number; role: string },
   note: string
@@ -1495,6 +1502,7 @@ async function settleCouponsForFixture(
   const coupons = await client.query<{
     id: string;
     code: string;
+    owner_id: string;
     stake_cents: string;
     limit_applied_cents: string;
     is_demo: boolean;
@@ -1507,15 +1515,15 @@ async function settleCouponsForFixture(
       }>;
     };
   }>(
-    `SELECT id, code, stake_cents, limit_applied_cents, is_demo, odds_snapshot
+    `SELECT id, code, owner_id, stake_cents, limit_applied_cents, is_demo, odds_snapshot
        FROM coupons
-      WHERE owner_id = $1 AND status = 'accepted'
+      WHERE status = 'accepted'
         AND EXISTS (
           SELECT 1 FROM jsonb_array_elements(odds_snapshot->'selections') s
-           WHERE s->>'providerFixtureId' = $2
+           WHERE s->>'providerFixtureId' = $1
         )
       FOR UPDATE`,
-    [ownerId, fixtureId]
+    [fixtureId]
   );
 
   const summary: SettlementSummary = { won: 0, lost: 0, voided: 0, pending: 0, coupons: [] };
@@ -1531,6 +1539,12 @@ async function settleCouponsForFixture(
       }));
     if (legs.length === 0) {
       summary.pending++;
+      summary.coupons.push({
+        code: coupon.code,
+        status: "pending",
+        duePayoutCents: 0,
+        ownerId: Number(coupon.owner_id),
+      });
       continue;
     }
 
@@ -1574,6 +1588,12 @@ async function settleCouponsForFixture(
     );
     if (evaluation.status === "pending") {
       summary.pending++;
+      summary.coupons.push({
+        code: coupon.code,
+        status: "pending",
+        duePayoutCents: 0,
+        ownerId: Number(coupon.owner_id),
+      });
       continue;
     }
 
@@ -1606,7 +1626,7 @@ async function settleCouponsForFixture(
       await client.query(
         `INSERT INTO financial_movements (owner_id, coupon_id, type, amount_cents, is_demo, note, created_by)
          VALUES ($2,$1,'prize_due',$3,$4,$5,$6)`,
-        [coupon.id, ownerId, due, coupon.is_demo, "prêmio devido apurado automaticamente", actor.id]
+        [coupon.id, Number(coupon.owner_id), due, coupon.is_demo, "prêmio devido apurado automaticamente", actor.id]
       );
       summary.won++;
     } else if (evaluation.status === "lost") {
@@ -1615,13 +1635,18 @@ async function settleCouponsForFixture(
       // Estorno da stake: ajuste negativo no caixa.
       await client.query(
         `INSERT INTO financial_movements (owner_id, coupon_id, type, amount_cents, is_demo, note, created_by)
-         SELECT $2, $1, 'adjustment', -stake_cents, is_demo, 'estorno de stake (seleções anuladas)', $3
+         SELECT owner_id, $1, 'adjustment', -stake_cents, is_demo, 'estorno de stake (seleções anuladas)', $2
            FROM coupons WHERE id = $1`,
-        [coupon.id, ownerId, actor.id]
+        [coupon.id, actor.id]
       );
       summary.voided++;
     }
-    summary.coupons.push({ code: coupon.code, status: finalStatus, duePayoutCents: due });
+    summary.coupons.push({
+      code: coupon.code,
+      status: finalStatus,
+      duePayoutCents: due,
+      ownerId: Number(coupon.owner_id),
+    });
   }
 
   return summary;
@@ -1656,7 +1681,7 @@ ownerRoutes.put("/events/:id/result", async (req, res, next) => {
     }
 
     const isVoid = Boolean(body.void);
-    let summary: SettlementSummary = { won: 0, lost: 0, voided: 0, pending: 0, coupons: [] };
+    let globalSummary: SettlementSummary = { won: 0, lost: 0, voided: 0, pending: 0, coupons: [] };
 
     await withTransaction(async (client) => {
       await client.query(
@@ -1679,9 +1704,8 @@ ownerRoutes.put("/events/:id/result", async (req, res, next) => {
         ]
       );
 
-      summary = await settleCouponsForFixture(
+      globalSummary = await settleCouponsForFixture(
         client,
-        ownerId,
         ev.provider_fixture_id,
         { id: req.user!.id, role: req.user!.role },
         body.note ??
@@ -1702,16 +1726,30 @@ ownerRoutes.put("/events/:id/result", async (req, res, next) => {
           cornersTotal: body.cornersTotal ?? null,
           shotsOnGoalTotal: body.shotsOnGoalTotal ?? null,
           void: isVoid,
-          settled: summary,
+          settled: globalSummary,
         },
       }, client);
     });
+
+    const ownCoupons = globalSummary.coupons.filter((c) => c.ownerId === ownerId);
+    const summary = {
+      won: ownCoupons.filter((c) => c.status === "won").length,
+      lost: ownCoupons.filter((c) => c.status === "lost").length,
+      voided: ownCoupons.filter((c) => c.status === "cancelled").length,
+      pending: ownCoupons.filter((c) => c.status === "pending").length,
+      coupons: ownCoupons.map((c) => ({
+        code: c.code,
+        status: c.status,
+        duePayoutCents: c.duePayoutCents,
+      })),
+    };
 
     res.json({
       ok: true,
       final: true,
       void: isVoid,
       settlement: summary,
+      otherOwnersCouponsSettled: globalSummary.coupons.filter((c) => c.ownerId !== ownerId).length,
     });
   } catch (err) {
     next(err);

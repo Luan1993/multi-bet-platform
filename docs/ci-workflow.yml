@@ -1,0 +1,35 @@
+# Exemplo de workflow do GitHub Actions.
+#
+# O token usado no deploy original não tem o escopo `workflow`, então este
+# arquivo fica em docs/ em vez de .github/workflows/. Para ativar o pipeline:
+#   1. gere um token com escopo `workflow` (ou use a interface do GitHub);
+#   2. copie este arquivo para .github/workflows/ci.yml;
+#   3. faça commit e push.
+#
+# O mesmo pipeline pode ser executado localmente com `npm run ci`.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck, test and build
+        run: npm run ci

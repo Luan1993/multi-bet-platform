@@ -16,13 +16,56 @@ export interface BackupResult {
   tables: Array<{ table: string; rows: number }>;
 }
 
+/**
+ * Ordena as tabelas para que as referenciadas sejam inseridas antes das que
+ * dependem delas. Sem isso o restore falha nas foreign keys (a ordem
+ * alfabética, por exemplo, colocaria `audit_logs` antes de `users`).
+ */
+async function orderTablesByForeignKeys(tables: string[]): Promise<string[]> {
+  const deps = await query<{ tbl: string; ref: string }>(
+    `SELECT src.relname AS tbl, ref.relname AS ref
+       FROM pg_constraint con
+       JOIN pg_class src ON src.oid = con.conrelid
+       JOIN pg_class ref ON ref.oid = con.confrelid
+       JOIN pg_namespace n ON n.oid = src.relnamespace
+      WHERE con.contype = 'f' AND n.nspname = 'public'`
+  );
+  const known = new Set(tables);
+  const byTable = new Map<string, Set<string>>();
+  for (const table of tables) byTable.set(table, new Set());
+  for (const d of deps) {
+    if (d.tbl !== d.ref && known.has(d.tbl) && known.has(d.ref)) {
+      byTable.get(d.tbl)!.add(d.ref);
+    }
+  }
+
+  const ordered: string[] = [];
+  const visiting = new Set<string>();
+  const done = new Set<string>();
+  const visit = (table: string) => {
+    if (done.has(table)) return;
+    if (visiting.has(table)) {
+      throw new Error(
+        `Ciclo de foreign keys envolvendo "${table}". O backup precisa de ordem manual.`
+      );
+    }
+    visiting.add(table);
+    for (const ref of byTable.get(table) ?? []) visit(ref);
+    visiting.delete(table);
+    done.add(table);
+    ordered.push(table);
+  };
+  for (const table of [...tables].sort()) visit(table);
+  return ordered;
+}
+
 export async function buildSqlBackup(): Promise<BackupResult> {
-  const tables = await query<{ table_name: string }>(
+  const rawTables = await query<{ table_name: string }>(
     `SELECT table_name
        FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-      ORDER BY table_name`
+      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
   );
+  const tables = await orderTablesByForeignKeys(rawTables.map((t) => t.table_name));
 
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   const out: string[] = [];
@@ -32,11 +75,18 @@ export async function buildSqlBackup(): Promise<BackupResult> {
   out.push("SET client_encoding = 'UTF8';");
   out.push("BEGIN;");
   out.push("");
+  // O restore substitui os dados atuais, incluindo linhas criadas pelas
+  // migrações (ex.: payment_integrations), antes de inserir o backup.
+  out.push(
+    `TRUNCATE TABLE ${tables
+      .map((t) => `"${t.replace(/"/g, '""')}"`)
+      .join(", ")} RESTART IDENTITY CASCADE;`
+  );
+  out.push("");
 
   const summary: Array<{ table: string; rows: number }> = [];
 
-  for (const row of tables) {
-    const table = row.table_name;
+  for (const table of tables) {
     const cols = await query<{ column_name: string }>(
       `SELECT column_name
          FROM information_schema.columns
@@ -55,7 +105,11 @@ export async function buildSqlBackup(): Promise<BackupResult> {
     const insertCols = columnNames.map((c) => `"${c.replace(/"/g, '""')}"`).join(", ");
     for (const dataRow of data) {
       const values = columnNames.map((c) => quote(dataRow[c])).join(", ");
-      out.push(`INSERT INTO ${escapedTable} (${insertCols}) VALUES (${values});`);
+      // Restaurar sobre um banco já migrado não deve duplicar o controle de
+      // migrações; as demais tabelas são restauradas integralmente.
+      const conflict =
+        table === "schema_migrations" ? " ON CONFLICT (name) DO NOTHING" : "";
+      out.push(`INSERT INTO ${escapedTable} (${insertCols}) VALUES (${values})${conflict};`);
     }
 
     if (columnNames.includes("id")) {

@@ -31,14 +31,49 @@ function quote(value) {
   return `'${String(value).replace(/'/g, "''")}'`;
 }
 
+/** Pais antes dos filhos: as FKs exigem essa ordem no restore. */
+async function orderTablesByForeignKeys(tables) {
+  const deps = await client.query(
+    `SELECT src.relname AS tbl, ref.relname AS ref
+       FROM pg_constraint con
+       JOIN pg_class src ON src.oid = con.conrelid
+       JOIN pg_class ref ON ref.oid = con.confrelid
+       JOIN pg_namespace n ON n.oid = src.relnamespace
+      WHERE con.contype = 'f' AND n.nspname = 'public'`
+  );
+  const known = new Set(tables);
+  const byTable = new Map(tables.map((t) => [t, new Set()]));
+  for (const d of deps.rows) {
+    if (d.tbl !== d.ref && known.has(d.tbl) && known.has(d.ref)) {
+      byTable.get(d.tbl).add(d.ref);
+    }
+  }
+  const ordered = [];
+  const visiting = new Set();
+  const done = new Set();
+  const visit = (table) => {
+    if (done.has(table)) return;
+    if (visiting.has(table)) {
+      throw new Error(`Ciclo de foreign keys envolvendo "${table}".`);
+    }
+    visiting.add(table);
+    for (const ref of byTable.get(table) ?? []) visit(ref);
+    visiting.delete(table);
+    done.add(table);
+    ordered.push(table);
+  };
+  for (const table of [...tables].sort()) visit(table);
+  return ordered;
+}
+
 try {
   await client.connect();
-  const tables = await client.query(
+  const rawTables = await client.query(
     `SELECT table_name
        FROM information_schema.tables
-      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-      ORDER BY table_name`
+      WHERE table_schema = 'public' AND table_type = 'BASE TABLE'`
   );
+  const tables = await orderTablesByForeignKeys(rawTables.rows.map((r) => r.table_name));
 
   const out = [];
   out.push("-- Backup lógico multi-bet");
@@ -47,10 +82,13 @@ try {
   out.push("SET client_encoding = 'UTF8';");
   out.push("BEGIN;");
   out.push("");
+  out.push(
+    `TRUNCATE TABLE ${tables.map((t) => `"${t.replace(/"/g, '""')}"`).join(", ")} RESTART IDENTITY CASCADE;`
+  );
+  out.push("");
 
   const summary = [];
-  for (const row of tables.rows) {
-    const table = row.table_name;
+  for (const table of tables) {
     const cols = await client.query(
       `SELECT column_name
          FROM information_schema.columns
@@ -72,7 +110,8 @@ try {
       const values = columnNames
         .map((c) => quote(dataRow[c]))
         .join(", ");
-      out.push(`INSERT INTO "${table.replace(/"/g, '""')}" (${insertCols}) VALUES (${values});`);
+      const conflict = table === "schema_migrations" ? " ON CONFLICT (name) DO NOTHING" : "";
+      out.push(`INSERT INTO "${table.replace(/"/g, '""')}" (${insertCols}) VALUES (${values})${conflict};`);
     }
     // Sincroniza sequences para evitar colisão de IDs após o restore.
     if (columnNames.includes("id")) {
